@@ -207,7 +207,8 @@ def summarize_zip(zip_path: Path, max_files: int, max_bytes_per_file: int, max_t
 
 
 def parse_json_from_text(raw_text: str) -> dict:
-    text = raw_text.strip()
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw_text or "")
+    text = text.replace("\r", "\n").strip()
     try:
         return json.loads(text)
     except json.JSONDecodeError:
@@ -217,10 +218,16 @@ def parse_json_from_text(raw_text: str) -> dict:
     if fence_match:
         return json.loads(fence_match.group(1))
 
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        return json.loads(text[start : end + 1])
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            parsed, _end = decoder.raw_decode(text[idx:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
 
     raise ValueError("Could not parse JSON from model output.")
 
@@ -272,7 +279,6 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
         ollama_exec,
         "run",
         config.local_model,
-        prompt,
     ]
 
     env = os.environ.copy()
@@ -282,8 +288,11 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     try:
         proc = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
             check=False,
             cwd=str(app_base_dir()),
