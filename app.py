@@ -13,7 +13,8 @@ import urllib.request
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import END, StringVar, Text, Tk, filedialog, messagebox, ttk
+from tkinter import END, StringVar, Tk, filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
 
 CONFIG_FILE = "config.properties"
 OUTPUT_DIR = Path("output")
@@ -516,6 +517,16 @@ def dedupe_issues(issues: list[dict]) -> list[dict]:
     return deduped
 
 
+def annotate_source_issues(issues: list[dict], source_tag: str) -> list[dict]:
+    tagged = []
+    for issue in issues:
+        cloned = dict(issue)
+        if source_tag == "chatgpt":
+            cloned["title"] = f"[chatgpt] {cloned.get('title', 'Potential security issue')}"
+        tagged.append(cloned)
+    return tagged
+
+
 def _run_regex_tool(tool_name: str, payload: dict, patterns: list[tuple[re.Pattern, str, str, str, str]]) -> list[dict]:
     issues = []
     for item in payload.get("files", []):
@@ -860,24 +871,21 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
     chatgpt_result = run_openai_chatgpt_analysis(config, analysis_prompt, payload)
-    chatgpt_issues = []
-    if chatgpt_result:
-        chatgpt_issues = chatgpt_result.get("issues", [])
+    chatgpt_issues = annotate_source_issues(chatgpt_result.get("issues", []), "chatgpt") if chatgpt_result else []
 
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
     tool_issues, tools_used = run_internal_library_analyses(payload)
 
-    local_and_chatgpt_model = {
-        "issues": dedupe_issues(model_result.get("issues", []) + chatgpt_issues)
-    }
-    learn_when_tools_outperform_model(local_and_chatgpt_model, tool_issues)
+    merged_model_issues = dedupe_issues(model_result.get("issues", []) + chatgpt_issues)
+    merged_external_issues = dedupe_issues(tool_issues + chatgpt_issues)
+    learn_when_tools_outperform_model(model_result, merged_external_issues)
 
     fixed = merge_and_score_results(
-        {**model_result, "issues": local_and_chatgpt_model["issues"]},
+        {**model_result, "issues": merged_model_issues},
         heuristic_issues,
-        tool_issues,
+        tool_issues + chatgpt_issues,
         payload,
-        tools_used,
+        tools_used + (["chatgpt"] if chatgpt_issues else []),
     )
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
@@ -955,7 +963,6 @@ class ZipSecurityApp:
         controls.pack(fill="x", pady=(0, 10))
         ttk.Button(controls, text="Upload ZIP Files", style="Bubble.TButton", command=self.select_files).pack(side="left")
         ttk.Button(controls, text="Run Local Analysis", style="Bubble.TButton", command=self.run_analysis).pack(side="left", padx=8)
-        ttk.Button(controls, text="Teach From Current Results", style="Bubble.TButton", command=self.teach_from_current_results).pack(side="left", padx=8)
         ttk.Button(controls, text="Export Visible JSON", style="Bubble.TButton", command=self.save_output).pack(side="left")
         ttk.Label(controls, textvariable=self.status, style="Sub.TLabel").pack(side="left", padx=12)
 
@@ -968,7 +975,7 @@ class ZipSecurityApp:
         main.add(right, weight=3)
 
         ttk.Label(left, text="Selected ZIP Files", style="CardTitle.TLabel").pack(anchor="w")
-        self.file_list = Text(left, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=14, relief="flat")
+        self.file_list = ScrolledText(left, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=14, relief="flat", wrap="none")
         self.file_list.pack(fill="both", expand=True, pady=(6, 0))
 
         ttk.Label(right, text="Findings", style="CardTitle.TLabel").pack(anchor="w")
@@ -981,7 +988,7 @@ class ZipSecurityApp:
         self.issues_tree.bind("<<TreeviewSelect>>", self._on_issue_selected)
 
         ttk.Label(right, text="Issue Details", style="CardTitle.TLabel").pack(anchor="w")
-        self.issue_details = Text(right, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=6, relief="flat")
+        self.issue_details = ScrolledText(right, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=10, relief="flat", wrap="word")
         self.issue_details.pack(fill="x", pady=(6, 8))
 
         self.output_tabs = ttk.Notebook(right)
@@ -992,10 +999,10 @@ class ZipSecurityApp:
         self.output_tabs.add(human_tab, text="Human Readable Report")
         self.output_tabs.add(json_tab, text="Raw JSON")
 
-        self.human_output = Text(human_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat")
+        self.human_output = ScrolledText(human_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat", wrap="word")
         self.human_output.pack(fill="both", expand=True, pady=(6, 0))
 
-        self.output = Text(json_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat")
+        self.output = ScrolledText(json_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat", wrap="none")
         self.output.pack(fill="both", expand=True, pady=(6, 0))
 
     def _metric_card(self, parent, title: str, value_var: StringVar):
@@ -1104,14 +1111,18 @@ class ZipSecurityApp:
         if not issue:
             return
 
+        title = issue.get("title", "")
         text = (
-            f"ID: {issue.get('id', '')}\n"
-            f"Severity: {issue.get('severity', '')}\n"
-            f"File: {issue.get('file', '')}:{issue.get('line_number', '')}\n"
-            f"Title: {issue.get('title', '')}\n\n"
-            f"Why: {issue.get('why_this_is_a_problem', '')}\n\n"
-            f"Suggested fix: {issue.get('suggested_fix', '')}\n\n"
-            f"Code: {issue.get('offending_code', '')}"
+            f"{title}\n"
+            f"{'=' * max(18, len(str(title)))}\n"
+            f"Issue ID: {issue.get('id', '')}    Severity: {issue.get('severity', '')}\n"
+            f"Location: {issue.get('file', '')}:{issue.get('line_number', '')}\n\n"
+            f"Why this matters\n"
+            f"- {issue.get('why_this_is_a_problem', '')}\n\n"
+            f"Recommended fix\n"
+            f"- {issue.get('suggested_fix', '')}\n\n"
+            f"Offending code\n"
+            f"{issue.get('offending_code', '')}"
         )
         self.issue_details.delete("1.0", END)
         self.issue_details.insert(END, text)
@@ -1138,13 +1149,16 @@ class ZipSecurityApp:
         lines.append("")
 
         for issue in all_issues[:120]:
-            lines.append(f"[{issue.get('id')}] {issue.get('severity')} - {issue.get('title')}")
-            lines.append(f"  Location: {issue.get('file')}:{issue.get('line_number')}")
-            lines.append(f"  Why: {issue.get('why_this_is_a_problem')}")
-            lines.append(f"  Fix: {issue.get('suggested_fix')}")
+            lines.append(f"{issue.get('id')} | {issue.get('severity')} | {issue.get('title')}")
+            lines.append(f"Location: {issue.get('file')}:{issue.get('line_number')}")
+            lines.append("Why this matters:")
+            lines.append(f"  {issue.get('why_this_is_a_problem')}")
+            lines.append("Recommended fix:")
+            lines.append(f"  {issue.get('suggested_fix')}")
             if issue.get("offending_code"):
-                lines.append(f"  Code: {issue.get('offending_code')}")
-            lines.append("")
+                lines.append("Offending code:")
+                lines.append(f"  {issue.get('offending_code')}")
+            lines.append("-" * 72)
 
         return "\n".join(lines)
 
@@ -1157,6 +1171,7 @@ class ZipSecurityApp:
                 self._refresh_dashboard(payload)
                 self.output.insert(END, json.dumps(payload, indent=2))
                 self.human_output.insert(END, self._render_human_readable(payload))
+                learn_from_result_pack(payload)
             else:
                 self.status.set("Analysis failed.")
                 self.output.insert(END, payload)
@@ -1165,14 +1180,6 @@ class ZipSecurityApp:
         except queue.Empty:
             pass
         self.root.after(250, self._poll_results)
-
-    def teach_from_current_results(self):
-        if not self.results_cache:
-            messagebox.showinfo("No results", "Run an analysis first, then teach from those findings.")
-            return
-        learn_from_result_pack(self.results_cache)
-        memory = load_learning_memory()
-        messagebox.showinfo("Learning updated", f"Stored examples: {len(memory.get('entries', []))}")
 
     def save_output(self):
         content = self.output.get("1.0", END).strip()

@@ -126,14 +126,14 @@ Only the first 3 available analyzers are used per run.
 
 The app can also query ChatGPT with the same prompt/temperature used for local analysis and merge those findings into the same output JSON shape when `OPENAI_API_KEY` (or configured env var) is present.
 
-If tool findings are missed by the model (local+ChatGPT union), those misses are automatically added to learning memory so future model prompts include those patterns.
+ChatGPT findings are merged (not just compared) into the app result list with deduplication. Tool/ChatGPT findings missed by the local model are automatically added to learning memory so future model prompts include those patterns.
 
 The merge stage now de-duplicates overlapping findings (including learned-pattern repeats) and computes grade/certainty with a weighted formula that factors severity mix, analyzer breadth, and model/tool agreement.
 
 ## Continuous local learning
 You can iteratively improve local results without cloud training:
-- Run analysis
-- Click **Teach From Current Results** to save findings into `learning_memory.json`
+- Run analysis (learning now happens automatically after each successful run)
+- Findings are persisted into `learning_memory.json` without manual action
 - Future runs inject these examples into prompt context and also match learned patterns directly in code
 
 On the **first run only**, the app also injects a built-in bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, hardcoded secrets, open redirects, etc.) so the local model starts with calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
