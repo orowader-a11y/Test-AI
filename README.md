@@ -1,9 +1,23 @@
-# Frontend ZIP Security Analyzer
+# Frontend ZIP Security Analyzer (Local LLM)
 
-Windows desktop GUI for uploading frontend ZIP archives and running ChatGPT-powered static security analysis that returns strict JSON in the exact structure requested.
+A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM** (no remote API), and outputs strict JSON.
 
-## Output JSON format
-The app enforces this shape:
+## Local-LLM approach
+This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider.
+
+- No remote OpenAI call is made.
+- Analysis runs by invoking `ollama run <model> <prompt>`.
+- Model/provider are configurable in `config.properties`.
+
+## Required local setup
+Install Ollama and pull a model (example):
+
+```bash
+ollama pull llama3.1:8b
+```
+
+## Strict output JSON format
+The analyzer enforces this exact shape:
 
 ```json
 {
@@ -25,8 +39,8 @@ The app enforces this shape:
 }
 ```
 
-## Security checks requested in the prompt
-The model is instructed to evaluate, including cross-file reasoning:
+## Security checks included
+The prompt requests cross-file analysis for:
 - Exposed secrets/tokens
 - API endpoint leaks
 - Unsafe auth flows
@@ -43,16 +57,17 @@ The model is instructed to evaluate, including cross-file reasoning:
 - SSRF-enabling frontend patterns
 - AI-generated insecure code patterns
 
-## Configure credentials
+## Configuration
 Edit `config.properties`:
 
 ```properties
-openai.apiKey=YOUR_KEY
-openai.model=gpt-4.1-mini
-openai.apiBase=https://api.openai.com/v1
-openai.temperature=0.1
+local.provider=ollama
+local.model=llama3.1:8b
+local.ollamaCommand=ollama
+local.temperature=0.1
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
+analysis.maxTotalChars=180000
 ```
 
 ## Run in development
@@ -60,12 +75,18 @@ analysis.maxBytesPerFile=9000
 python app.py
 ```
 
-## Build a Windows .exe
-Run this on Windows:
+## Build Windows .exe
+Run on Windows:
 
 ```bat
 build_exe.bat
 ```
 
-Expected output executable:
+Expected executable:
 - `dist\FrontendZipSecurityAnalyzer.exe`
+
+## UI update
+The UI was redesigned in a SonarQube-inspired style:
+- Dark dashboard theme
+- KPI cards (security grade, certainty, files, issues)
+- Findings table + raw JSON panel
