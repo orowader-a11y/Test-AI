@@ -106,6 +106,20 @@ The app now tries, in order:
 
 This issue is unrelated to ZIP file paths; ZIP handling happens after the Ollama executable is resolved.
 
+
+## Internal library cross-check (up to 3 tools)
+Each run now compares local-LLM findings against up to three internal Python-based analyzers and merges all findings into the same JSON result shape used by the UI/export.
+
+Tool selection order:
+1. `sonarqube` analyzer (preferred when SonarQube Python package or `sonar-scanner` is available)
+2. dependency-focused analyzer (`dep-audit-py`)
+3. frontend sink/dataflow analyzer (`frontend-sast-py`)
+4. secret-pattern analyzer (`secrets-py`)
+
+Only the first 3 available analyzers are used per run.
+
+If tool findings are missed by the model, those misses are automatically added to learning memory so future model prompts include those patterns.
+
 ## Continuous local learning
 You can iteratively improve local results without cloud training:
 - Run analysis

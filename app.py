@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 import queue
 import re
@@ -470,6 +471,119 @@ def _make_issue(file_path: str, line_number: int, idx: int, title: str, severity
     }
 
 
+def _tool_issue_key(issue: dict) -> tuple[str, int, str]:
+    return (
+        str(issue.get("file", "unknown")),
+        max(1, int(issue.get("line_number", 1) or 1)),
+        str(issue.get("title", "")).strip().lower(),
+    )
+
+
+def _run_regex_tool(tool_name: str, payload: dict, patterns: list[tuple[re.Pattern, str, str, str, str]]) -> list[dict]:
+    issues = []
+    for item in payload.get("files", []):
+        file_path = str(item.get("path", "unknown"))
+        content = item.get("content") or ""
+        if not content:
+            continue
+        for regex, title, severity, why, fix in patterns:
+            for match in regex.finditer(content):
+                line = content.count("\n", 0, match.start()) + 1
+                code_line = content[match.start() : match.start() + 180].splitlines()[0].strip()
+                issues.append(
+                    _make_issue(
+                        file_path,
+                        line,
+                        len(issues) + 1,
+                        f"[{tool_name}] {title}",
+                        severity,
+                        code_line,
+                        why,
+                        fix,
+                    )
+                )
+                if len(issues) >= 80:
+                    return issues
+    return issues
+
+
+def run_internal_library_analyses(payload: dict) -> tuple[list[dict], list[str]]:
+    tool_issues: list[dict] = []
+    tools_used: list[str] = []
+
+    tool_specs = []
+    sonarqube_available = bool(importlib.util.find_spec("sonarqube")) or bool(shutil.which("sonar-scanner"))
+    if sonarqube_available:
+        sonarqube_patterns = [
+            (re.compile(r"dangerouslySetInnerHTML", re.IGNORECASE), "Unsanitized HTML rendering sink", "High", "Sonar-style sink detection flagged raw HTML rendering path.", "Use safe DOM APIs or sanitize trusted HTML with an allowlist sanitizer."),
+            (re.compile(r"window\.postMessage\([^\n]{0,200},\s*(?:\"|\')\*(?:\"|\')", re.IGNORECASE), "Wildcard postMessage target", "High", "Wildcard target origin may leak sensitive payloads to untrusted windows.", "Set explicit targetOrigin and validate event.origin on receiver side."),
+            (re.compile(r"(?:location\.(?:href|assign|replace)\s*=|window\.open\()", re.IGNORECASE), "Potential open redirect", "Medium", "Navigation sinks should validate attacker-controlled URLs.", "Restrict redirects to same-origin or allowlisted destinations."),
+        ]
+        tool_specs.append(("sonarqube", sonarqube_patterns))
+
+    dependency_patterns = [
+        (re.compile(r'"(lodash|minimist|jquery|moment)"\s*:\s*"(?:\^|~)?[0-3]?\.?[0-9]*', re.IGNORECASE), "Potentially outdated frontend dependency", "Medium", "Outdated dependency signatures can indicate known vulnerable versions.", "Pin and upgrade dependency versions, then review CVEs in advisories."),
+        (re.compile(r"npm install [^\n]*--force", re.IGNORECASE), "Forced dependency install command", "Low", "--force may bypass important package manager protections.", "Avoid force installs and resolve peer/dependency conflicts explicitly."),
+    ]
+    tool_specs.append(("dep-audit-py", dependency_patterns))
+
+    dataflow_patterns = [
+        (re.compile(r"(?:innerHTML|outerHTML)\s*=\s*[^\n;]+", re.IGNORECASE), "DOM injection sink", "Medium", "Dynamic HTML assignment can create XSS when data is attacker-controlled.", "Prefer textContent/DOM createElement patterns or sanitize before injection."),
+        (re.compile(r"(?:localStorage|sessionStorage)\.setItem\([^\n]{0,150}(?:token|jwt|auth|session)", re.IGNORECASE), "Sensitive session artifact in web storage", "High", "Web storage is exposed to script context and XSS abuse.", "Use HttpOnly + Secure cookies and server session controls for sensitive tokens."),
+        (re.compile(r"(?:eval\s*\(|new\s+Function\s*\()", re.IGNORECASE), "Dynamic code execution sink", "High", "Executing dynamic strings increases code injection risk.", "Replace dynamic execution with strict parsers or explicit command dispatch."),
+    ]
+    tool_specs.append(("frontend-sast-py", dataflow_patterns))
+
+    secrets_patterns = [
+        (re.compile(r"(?:api[_-]?key|secret|token)\s*[:=]\s*(?:\"|\')[A-Za-z0-9_\-]{16,}(?:\"|\')", re.IGNORECASE), "Hardcoded credential-like value", "Critical", "Credential-like string appears hardcoded in frontend-reachable code.", "Move secrets to backend and rotate exposed credentials immediately."),
+        (re.compile(r"(?:AKIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]{10,})"), "Cloud/payment key pattern detected", "Critical", "Known secret prefix signature detected.", "Revoke and rotate keys; use secure secret management outside client bundles."),
+    ]
+    tool_specs.append(("secrets-py", secrets_patterns))
+
+    selected_specs = tool_specs[:3]
+    for tool_name, patterns in selected_specs:
+        tool_issues.extend(_run_regex_tool(tool_name, payload, patterns))
+        tools_used.append(tool_name)
+
+    return tool_issues, tools_used
+
+
+def learn_when_tools_outperform_model(model_result: dict, tool_issues: list[dict]) -> int:
+    if not tool_issues:
+        return 0
+    model_keys = {_tool_issue_key(issue) for issue in model_result.get("issues", [])}
+    missed = [issue for issue in tool_issues if _tool_issue_key(issue) not in model_keys]
+    if not missed:
+        return 0
+
+    memory = load_learning_memory()
+    entries = memory.get("entries", [])
+    seen = {(e.get("title", ""), e.get("pattern", "")) for e in entries}
+
+    for issue in missed:
+        pattern = _extract_pattern(issue.get("offending_code", ""))
+        title = issue.get("title", "Potential security issue")
+        key = (title, pattern)
+        if key in seen:
+            continue
+        entries.append(
+            {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "title": title,
+                "severity": issue.get("severity", "Medium"),
+                "pattern": pattern,
+                "why": issue.get("why_this_is_a_problem", ""),
+                "fix": issue.get("suggested_fix", ""),
+                "source": "tool_missed_by_model",
+            }
+        )
+        seen.add(key)
+
+    memory["entries"] = entries[-200:]
+    save_learning_memory(memory)
+    return len(missed)
+
+
 def detect_static_security_issues(payload: dict, learning_entries: list[dict] | None = None) -> list[dict]:
     patterns = [
         (re.compile(r"localStorage\.setItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token stored in localStorage", "High", "Client-side storage is readable by injected scripts.", "Use HttpOnly, Secure cookies and short-lived server-managed sessions."),
@@ -578,7 +692,7 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
     )
 
 
-def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
+def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None = None) -> dict:
     learning_memory = load_learning_memory()
     learning_context = build_learning_context(config)
     bootstrap_context = build_bootstrap_context()
@@ -644,7 +758,9 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
-    fixed = merge_and_score_results(model_result, heuristic_issues, payload)
+    tool_issues, _tools_used = run_internal_library_analyses(payload)
+    learn_when_tools_outperform_model(model_result, tool_issues)
+    fixed = merge_and_score_results(model_result, heuristic_issues + tool_issues, payload)
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:
@@ -654,12 +770,13 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     if bootstrap_context:
         mark_bootstrap_examples_applied()
 
+
     return fixed
 
 
-def analyze_with_local_llm(config: AppConfig, payload: dict) -> dict:
+def analyze_with_local_llm(config: AppConfig, payload: dict, zip_path: Path | None = None) -> dict:
     if config.local_provider == "ollama":
-        return run_ollama_analysis(config, payload)
+        return run_ollama_analysis(config, payload, zip_path)
     raise RuntimeError(f"Unsupported local.provider: {config.local_provider}")
 
 
@@ -807,7 +924,7 @@ class ZipSecurityApp:
                     config.max_bytes_per_file,
                     config.max_total_chars,
                 )
-                result = analyze_with_local_llm(config, summary)
+                result = analyze_with_local_llm(config, summary, zip_path)
                 outfile = OUTPUT_DIR / f"{zip_path.stem}.analysis.json"
                 outfile.write_text(json.dumps(result, indent=2), encoding="utf-8")
                 aggregate.append({"zip": str(zip_path), "output_json": str(outfile), "result": result})
