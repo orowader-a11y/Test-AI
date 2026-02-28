@@ -112,6 +112,8 @@ You can iteratively improve local results without cloud training:
 - Click **Teach From Current Results** to save findings into `learning_memory.json`
 - Future runs inject these examples into prompt context and also match learned patterns directly in code
 
+On the **first run only**, the app also injects a built-in bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, hardcoded secrets, open redirects, etc.) so the local model starts with calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
+
 This is lightweight memory-based learning (few-shot + pattern reuse), not full model weight fine-tuning.
 
 ## UI update

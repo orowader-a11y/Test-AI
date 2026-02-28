@@ -40,6 +40,57 @@ SYSTEM_PROMPT = (
     "Analyze recursively and correlate cross-file issues."
 )
 
+BOOTSTRAP_MARKER_FILE = Path(".bootstrap_examples_applied")
+BOOTSTRAP_FEWSHOT_EXAMPLES = [
+    {
+        "file": "src/auth/session.js",
+        "code": "localStorage.setItem('jwt', token);",
+        "risk": "JWT token persisted in localStorage",
+        "fix": "Use HttpOnly, Secure cookies and rotate short-lived access tokens.",
+    },
+    {
+        "file": "src/chat/embed.ts",
+        "code": "window.postMessage(payload, '*');",
+        "risk": "Wildcard targetOrigin in postMessage",
+        "fix": "Set explicit trusted origin and verify event.origin on receive.",
+    },
+    {
+        "file": "src/profile/render.jsx",
+        "code": "<div dangerouslySetInnerHTML={{ __html: userBio }} />",
+        "risk": "Unsanitized HTML sink can enable XSS",
+        "fix": "Avoid raw HTML or sanitize with DOMPurify before rendering.",
+    },
+    {
+        "file": "src/config/client.ts",
+        "code": "const STRIPE_SECRET = 'sk_live_1234567890123456';",
+        "risk": "Hardcoded secret in frontend bundle",
+        "fix": "Move secret server-side and expose only public non-sensitive keys.",
+    },
+    {
+        "file": "src/nav/redirect.js",
+        "code": "window.location.href = nextUrl;",
+        "risk": "Open redirect sink",
+        "fix": "Validate/allowlist redirect targets before navigation.",
+    },
+    {
+        "file": "src/legacy/eval.js",
+        "code": "const result = eval(userSuppliedRule);",
+        "risk": "Dynamic code execution",
+        "fix": "Replace eval/new Function with safe parser or explicit dispatch.",
+    },
+    {
+        "file": "src/search/query.ts",
+        "code": "resultsEl.innerHTML = resultHtml;",
+        "risk": "Direct innerHTML assignment",
+        "fix": "Use textContent or sanitize untrusted HTML.",
+    },
+    {
+        "file": "src/session/cookie.js",
+        "code": "document.cookie = `session=${token}; path=/`;",
+        "risk": "Session token written via JS cookie",
+        "fix": "Set session cookies from server with HttpOnly + Secure + SameSite.",
+    },
+]
 
 @dataclass
 class AppConfig:
@@ -276,6 +327,32 @@ def learn_from_result_pack(result_pack: list[dict]):
     memory["entries"] = entries[-200:]
     save_learning_memory(memory)
 
+def should_include_bootstrap_examples() -> bool:
+    return not BOOTSTRAP_MARKER_FILE.exists()
+
+
+def mark_bootstrap_examples_applied():
+    try:
+        BOOTSTRAP_MARKER_FILE.write_text(datetime.utcnow().isoformat() + "Z", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def build_bootstrap_context() -> str:
+    if not should_include_bootstrap_examples():
+        return ""
+
+    lines = [
+        "First-run training examples (obviously insecure frontend snippets):",
+        "Use these as calibration signals when evaluating the uploaded ZIP.",
+    ]
+    for idx, item in enumerate(BOOTSTRAP_FEWSHOT_EXAMPLES, start=1):
+        lines.append(
+            f"EXAMPLE-{idx}: file={item['file']} | code={item['code']} | risk={item['risk']} | fix={item['fix']}"
+        )
+    return "\n".join(lines)
+
+
 def parse_json_from_text(raw_text: str) -> dict:
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw_text or "")
     text = text.replace("\r", "\n").strip()
@@ -496,14 +573,17 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
         "4) line_number should be best estimate from provided file content.\n"
         "5) No markdown, no comments, JSON only.\n"
         "6) Output must start with { and end with }.\n\n"
-        f"ZIP_SUMMARY:\n{json.dumps(payload)}"
+        f"ZIP_SUMMARY:\n{json.dumps(payload)}\n\n"
+        f"{learning_context}"
     )
 
 
 def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     learning_memory = load_learning_memory()
     learning_context = build_learning_context(config)
-    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload, learning_context)}"
+    bootstrap_context = build_bootstrap_context()
+    combined_context = "\n\n".join(part for part in [learning_context, bootstrap_context] if part)
+    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload, combined_context)}"
     ollama_exec = resolve_ollama_executable(config)
 
     env = os.environ.copy()
@@ -564,6 +644,10 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     for issue in fixed["issues"]:
         if issue["line_number"] == 1 and issue["offending_code"] and issue["file"] in file_content:
             issue["line_number"] = guess_line_number(file_content[issue["file"]], issue["offending_code"])
+
+    if bootstrap_context:
+        mark_bootstrap_examples_applied()
+
     return fixed
 
 
