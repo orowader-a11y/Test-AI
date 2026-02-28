@@ -70,6 +70,7 @@ local.temperature=0.1
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
 analysis.maxTotalChars=180000
+learning.maxExamples=6
 ```
 
 ## Run in development
@@ -105,8 +106,16 @@ The app now tries, in order:
 
 This issue is unrelated to ZIP file paths; ZIP handling happens after the Ollama executable is resolved.
 
+## Continuous local learning
+You can iteratively improve local results without cloud training:
+- Run analysis
+- Click **Teach From Current Results** to save findings into `learning_memory.json`
+- Future runs inject these examples into prompt context and also match learned patterns directly in code
+
+This is lightweight memory-based learning (few-shot + pattern reuse), not full model weight fine-tuning.
+
 ## UI update
-The UI was redesigned in a SonarQube-inspired style:
-- Dark dashboard theme
+The UI now uses a lighter, friendlier style and includes:
 - KPI cards (security grade, certainty, files, issues)
-- Findings table + raw JSON panel
+- Findings table + click-to-view issue details
+- Human-readable report tab and raw JSON tab

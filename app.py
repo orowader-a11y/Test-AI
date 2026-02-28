@@ -7,12 +7,14 @@ import subprocess
 import sys
 import threading
 import zipfile
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import END, StringVar, Text, Tk, filedialog, messagebox, ttk
 
 CONFIG_FILE = "config.properties"
 OUTPUT_DIR = Path("output")
+LEARNING_FILE = Path("learning_memory.json")
 
 STRICT_OUTPUT_EXAMPLE = {
     "overall_security_grade_percent": 72,
@@ -49,6 +51,7 @@ class AppConfig:
     max_files: int
     max_bytes_per_file: int
     max_total_chars: int
+    learning_examples: int
 
 
 def app_base_dir() -> Path:
@@ -76,6 +79,7 @@ def load_properties(path: str) -> AppConfig:
         max_files=int(values.get("analysis.maxFiles", "300")),
         max_bytes_per_file=int(values.get("analysis.maxBytesPerFile", "9000")),
         max_total_chars=int(values.get("analysis.maxTotalChars", "180000")),
+        learning_examples=int(values.get("learning.maxExamples", "6")),
     )
 
 
@@ -206,6 +210,72 @@ def summarize_zip(zip_path: Path, max_files: int, max_bytes_per_file: int, max_t
     }
 
 
+def load_learning_memory() -> dict:
+    if not LEARNING_FILE.exists():
+        return {"entries": []}
+    try:
+        data = json.loads(LEARNING_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("entries"), list):
+            return data
+    except Exception:
+        pass
+    return {"entries": []}
+
+
+def save_learning_memory(memory: dict):
+    LEARNING_FILE.write_text(json.dumps(memory, indent=2), encoding="utf-8")
+
+
+def _extract_pattern(snippet: str) -> str:
+    clean = (snippet or "").strip()
+    if not clean:
+        return ""
+    if len(clean) > 120:
+        clean = clean[:120]
+    return clean
+
+
+def build_learning_context(config: AppConfig) -> str:
+    memory = load_learning_memory()
+    entries = memory.get("entries", [])[-max(1, config.learning_examples) :]
+    if not entries:
+        return ""
+
+    lines = ["Known historical findings (high signal examples):"]
+    for item in entries:
+        lines.append(
+            f"- {item.get('title','Issue')} | severity={item.get('severity','Medium')} | "
+            f"pattern={item.get('pattern','')} | why={item.get('why','')} | fix={item.get('fix','')}"
+        )
+    return "\n".join(lines)
+
+
+def learn_from_result_pack(result_pack: list[dict]):
+    memory = load_learning_memory()
+    entries = memory.get("entries", [])
+    seen = {(e.get("title", ""), e.get("pattern", "")) for e in entries}
+
+    for pack in result_pack:
+        for issue in pack.get("result", {}).get("issues", []):
+            pattern = _extract_pattern(issue.get("offending_code", ""))
+            key = (issue.get("title", ""), pattern)
+            if key in seen:
+                continue
+            entries.append(
+                {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "title": issue.get("title", "Potential security issue"),
+                    "severity": issue.get("severity", "Medium"),
+                    "pattern": pattern,
+                    "why": issue.get("why_this_is_a_problem", ""),
+                    "fix": issue.get("suggested_fix", ""),
+                }
+            )
+            seen.add(key)
+
+    memory["entries"] = entries[-200:]
+    save_learning_memory(memory)
+
 def parse_json_from_text(raw_text: str) -> dict:
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw_text or "")
     text = text.replace("\r", "\n").strip()
@@ -323,7 +393,7 @@ def _make_issue(file_path: str, line_number: int, idx: int, title: str, severity
     }
 
 
-def detect_static_security_issues(payload: dict) -> list[dict]:
+def detect_static_security_issues(payload: dict, learning_entries: list[dict] | None = None) -> list[dict]:
     patterns = [
         (re.compile(r"localStorage\.setItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token stored in localStorage", "High", "Client-side storage is readable by injected scripts.", "Use HttpOnly, Secure cookies and short-lived server-managed sessions."),
         (re.compile(r'postMessage\([^\n]{0,200},\s*(?:"|\')\*(?:"|\')', re.IGNORECASE), "postMessage uses wildcard target origin", "High", "Using '*' as target origin can leak data to untrusted origins.", "Set an explicit trusted origin and validate message source/origin on receipt."),
@@ -349,6 +419,36 @@ def detect_static_security_issues(payload: dict) -> list[dict]:
                 issues.append(_make_issue(file_path, line, len(issues) + 1, title, severity, code_line, why, fix))
                 if len(issues) >= 120:
                     return issues
+
+    learning_entries = learning_entries or []
+    for item in payload.get("files", []):
+        file_path = str(item.get("path", "unknown"))
+        content = item.get("content") or ""
+        if not content:
+            continue
+
+        for learned in learning_entries:
+            pattern = (learned.get("pattern") or "").strip()
+            if not pattern or len(pattern) < 8:
+                continue
+            idx = content.find(pattern)
+            if idx < 0:
+                continue
+            line = content.count("\n", 0, idx) + 1
+            issues.append(
+                _make_issue(
+                    file_path,
+                    line,
+                    len(issues) + 1,
+                    f"Learned pattern match: {learned.get('title', 'Historical finding')}",
+                    learned.get("severity", "Medium"),
+                    pattern,
+                    learned.get("why", "Matched a previously observed risky pattern."),
+                    learned.get("fix", "Apply mitigation used for this known risky pattern."),
+                )
+            )
+            if len(issues) >= 150:
+                return issues
 
     return issues
 
@@ -384,7 +484,7 @@ def merge_and_score_results(model_result: dict, heuristic_issues: list[dict], fa
     return merged
 
 
-def build_analysis_prompt(payload: dict) -> str:
+def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
     return (
         "Analyze this uploaded frontend ZIP summary as a static security review. "
         "Apply cross-file reasoning. Return STRICT JSON exactly in this shape:\n"
@@ -401,7 +501,9 @@ def build_analysis_prompt(payload: dict) -> str:
 
 
 def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
-    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload)}"
+    learning_memory = load_learning_memory()
+    learning_context = build_learning_context(config)
+    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload, learning_context)}"
     ollama_exec = resolve_ollama_executable(config)
 
     env = os.environ.copy()
@@ -455,7 +557,7 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     except Exception:
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
-    heuristic_issues = detect_static_security_issues(payload)
+    heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
     fixed = merge_and_score_results(model_result, heuristic_issues, payload)
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
@@ -528,6 +630,7 @@ class ZipSecurityApp:
         controls.pack(fill="x", pady=(0, 10))
         ttk.Button(controls, text="Upload ZIP Files", style="Bubble.TButton", command=self.select_files).pack(side="left")
         ttk.Button(controls, text="Run Local Analysis", style="Bubble.TButton", command=self.run_analysis).pack(side="left", padx=8)
+        ttk.Button(controls, text="Teach From Current Results", style="Bubble.TButton", command=self.teach_from_current_results).pack(side="left", padx=8)
         ttk.Button(controls, text="Export Visible JSON", style="Bubble.TButton", command=self.save_output).pack(side="left")
         ttk.Label(controls, textvariable=self.status, style="Sub.TLabel").pack(side="left", padx=12)
 
@@ -735,6 +838,14 @@ class ZipSecurityApp:
         except queue.Empty:
             pass
         self.root.after(250, self._poll_results)
+
+    def teach_from_current_results(self):
+        if not self.results_cache:
+            messagebox.showinfo("No results", "Run an analysis first, then teach from those findings.")
+            return
+        learn_from_result_pack(self.results_cache)
+        memory = load_learning_memory()
+        messagebox.showinfo("Learning updated", f"Stored examples: {len(memory.get('entries', []))}")
 
     def save_output(self):
         content = self.output.get("1.0", END).strip()
