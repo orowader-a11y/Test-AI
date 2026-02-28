@@ -1,13 +1,13 @@
 # Frontend ZIP Security Analyzer (Local LLM)
 
-A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM** (no remote API), and outputs strict JSON.
+A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM**, and outputs strict JSON. It can optionally cross-check findings with ChatGPT when configured.
 
 ## Local-LLM approach
-This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider.
+This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider and optional **ChatGPT** cross-checking.
 
-- No remote OpenAI call is made.
-- Analysis runs by invoking `ollama run <model> <prompt>`.
-- Model/provider are configurable in `config.properties`.
+- Local analysis runs by invoking `ollama run <model> <prompt>`.
+- Optional ChatGPT analysis can be enabled for side-by-side finding comparison by setting an API key environment variable.
+- Models/providers are configurable in `config.properties`.
 
 ## Required local setup
 Install Ollama and pull a model (example):
@@ -67,6 +67,12 @@ local.ollamaCommand=ollama
 # optional absolute path, useful when .exe PATH does not include Ollama
 local.ollamaPath=
 local.temperature=0.1
+
+# optional ChatGPT cross-check (API key stays in environment variable)
+openai.model=gpt-4o-mini
+openai.apiKeyEnv=OPENAI_API_KEY
+openai.baseUrl=https://api.openai.com/v1/chat/completions
+
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
 analysis.maxTotalChars=180000
@@ -118,7 +124,9 @@ Tool selection order:
 
 Only the first 3 available analyzers are used per run.
 
-If tool findings are missed by the model, those misses are automatically added to learning memory so future model prompts include those patterns.
+The app can also query ChatGPT with the same prompt/temperature used for local analysis and merge those findings into the same output JSON shape when `OPENAI_API_KEY` (or configured env var) is present.
+
+If tool findings are missed by the model (local+ChatGPT union), those misses are automatically added to learning memory so future model prompts include those patterns.
 
 The merge stage now de-duplicates overlapping findings (including learned-pattern repeats) and computes grade/certainty with a weighted formula that factors severity mix, analyzer breadth, and model/tool agreement.
 

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import threading
 import zipfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,6 +106,9 @@ class AppConfig:
     max_bytes_per_file: int
     max_total_chars: int
     learning_examples: int
+    openai_model: str
+    openai_api_key_env: str
+    openai_base_url: str
 
 
 def app_base_dir() -> Path:
@@ -132,6 +137,9 @@ def load_properties(path: str) -> AppConfig:
         max_bytes_per_file=int(values.get("analysis.maxBytesPerFile", "9000")),
         max_total_chars=int(values.get("analysis.maxTotalChars", "180000")),
         learning_examples=int(values.get("learning.maxExamples", "6")),
+        openai_model=values.get("openai.model", "gpt-4o-mini"),
+        openai_api_key_env=values.get("openai.apiKeyEnv", "OPENAI_API_KEY"),
+        openai_base_url=values.get("openai.baseUrl", "https://api.openai.com/v1/chat/completions"),
     )
 
 
@@ -744,12 +752,54 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
     )
 
 
+
+
+def run_openai_chatgpt_analysis(config: AppConfig, prompt: str, payload: dict) -> dict | None:
+    api_key = os.environ.get(config.openai_api_key_env, "").strip()
+    if not api_key:
+        return None
+
+    body = {
+        "model": config.openai_model,
+        "temperature": config.temperature,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    req = urllib.request.Request(
+        config.openai_base_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        text = parsed["choices"][0]["message"]["content"]
+        return ensure_output_shape(parse_json_from_text(text), payload)
+    except Exception:
+        return None
+
+
 def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None = None) -> dict:
     learning_memory = load_learning_memory()
     learning_context = build_learning_context(config)
     bootstrap_context = build_bootstrap_context()
     combined_context = "\n\n".join(part for part in [learning_context, bootstrap_context] if part)
-    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload, combined_context)}"
+    analysis_prompt = build_analysis_prompt(payload, combined_context)
+    prompt = f"{SYSTEM_PROMPT}\n\n{analysis_prompt}"
     ollama_exec = resolve_ollama_executable(config)
 
     env = os.environ.copy()
@@ -809,10 +859,26 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
     except Exception:
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
+    chatgpt_result = run_openai_chatgpt_analysis(config, analysis_prompt, payload)
+    chatgpt_issues = []
+    if chatgpt_result:
+        chatgpt_issues = chatgpt_result.get("issues", [])
+
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
     tool_issues, tools_used = run_internal_library_analyses(payload)
-    learn_when_tools_outperform_model(model_result, tool_issues)
-    fixed = merge_and_score_results(model_result, heuristic_issues, tool_issues, payload, tools_used)
+
+    local_and_chatgpt_model = {
+        "issues": dedupe_issues(model_result.get("issues", []) + chatgpt_issues)
+    }
+    learn_when_tools_outperform_model(local_and_chatgpt_model, tool_issues)
+
+    fixed = merge_and_score_results(
+        {**model_result, "issues": local_and_chatgpt_model["issues"]},
+        heuristic_issues,
+        tool_issues,
+        payload,
+        tools_used,
+    )
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:
@@ -958,7 +1024,9 @@ class ZipSecurityApp:
             return
 
         config = load_properties(CONFIG_FILE)
-        self.status.set(f"Running local analysis via {config.local_provider}:{config.local_model}...")
+        chatgpt_enabled = bool(os.environ.get(config.openai_api_key_env, "").strip())
+        mode_label = f"{config.local_provider}:{config.local_model}" + (" + chatgpt" if chatgpt_enabled else "")
+        self.status.set(f"Running local analysis via {mode_label}...")
         self.output.delete("1.0", END)
         self.human_output.delete("1.0", END)
         self.issue_details.delete("1.0", END)
