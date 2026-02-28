@@ -121,3 +121,6 @@ The UI now uses a lighter, friendlier style and includes:
 - KPI cards (security grade, certainty, files, issues)
 - Findings table + click-to-view issue details
 - Human-readable report tab and raw JSON tab
+
+## Windows UX note
+When launched as a GUI app (`pythonw`/PyInstaller `--windowed`), analysis now starts Ollama subprocesses with `CREATE_NO_WINDOW` on Windows so an extra command prompt window does not pop up during scanning.

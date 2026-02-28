@@ -595,21 +595,27 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
         [ollama_exec, "run", config.local_model],
     ]
 
+    run_kwargs = {
+        "input": prompt,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": 600,
+        "check": False,
+        "cwd": str(app_base_dir()),
+        "env": env,
+    }
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+        run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
     proc = None
     last_error = ""
     for idx, cmd in enumerate(commands):
         try:
             proc = subprocess.run(
                 cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=600,
-                check=False,
-                cwd=str(app_base_dir()),
-                env=env,
+                **run_kwargs,
             )
         except FileNotFoundError as ex:
             raise RuntimeError(
