@@ -1,7 +1,10 @@
 import json
+import os
 import queue
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import zipfile
 from dataclasses import dataclass
@@ -41,10 +44,17 @@ class AppConfig:
     local_provider: str
     local_model: str
     ollama_command: str
+    ollama_path_hint: str
     temperature: float
     max_files: int
     max_bytes_per_file: int
     max_total_chars: int
+
+
+def app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 def load_properties(path: str) -> AppConfig:
@@ -61,10 +71,55 @@ def load_properties(path: str) -> AppConfig:
         local_provider=values.get("local.provider", "ollama").lower(),
         local_model=values.get("local.model", "llama3.1:8b"),
         ollama_command=values.get("local.ollamaCommand", "ollama"),
+        ollama_path_hint=values.get("local.ollamaPath", ""),
         temperature=float(values.get("local.temperature", "0.1")),
         max_files=int(values.get("analysis.maxFiles", "300")),
         max_bytes_per_file=int(values.get("analysis.maxBytesPerFile", "9000")),
         max_total_chars=int(values.get("analysis.maxTotalChars", "180000")),
+    )
+
+
+def resolve_ollama_executable(config: AppConfig) -> str:
+    candidates = []
+
+    if config.ollama_path_hint:
+        candidates.append(config.ollama_path_hint)
+
+    candidates.append(config.ollama_command)
+
+    which_cmd = shutil.which(config.ollama_command)
+    if which_cmd:
+        candidates.append(which_cmd)
+
+    if os.name == "nt":
+        localappdata = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", "")
+        candidates.extend(
+            [
+                str(Path(localappdata) / "Programs" / "Ollama" / "ollama.exe") if localappdata else "",
+                str(Path(program_files) / "Ollama" / "ollama.exe") if program_files else "",
+            ]
+        )
+    else:
+        candidates.extend(["/usr/local/bin/ollama", "/usr/bin/ollama"])
+
+    seen = set()
+    for cand in candidates:
+        cand = cand.strip()
+        if not cand or cand in seen:
+            continue
+        seen.add(cand)
+
+        if Path(cand).exists():
+            return cand
+
+        resolved = shutil.which(cand)
+        if resolved:
+            return resolved
+
+    raise RuntimeError(
+        "Could not resolve Ollama executable. Set local.ollamaPath in config.properties, "
+        "or ensure ollama is on PATH for the launched app process."
     )
 
 
@@ -212,19 +267,33 @@ def build_analysis_prompt(payload: dict) -> str:
 
 def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload)}"
+    ollama_exec = resolve_ollama_executable(config)
     cmd = [
-        config.ollama_command,
+        ollama_exec,
         "run",
         config.local_model,
         prompt,
     ]
 
+    env = os.environ.copy()
+    if os.name == "nt":
+        env["PATHEXT"] = env.get("PATHEXT", ".EXE;.BAT;.CMD")
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, check=False)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+            cwd=str(app_base_dir()),
+            env=env,
+        )
     except FileNotFoundError as ex:
         raise RuntimeError(
-            "Local provider is set to ollama, but the ollama command was not found. "
-            "Install Ollama and run a model first, e.g. `ollama pull llama3.1:8b`."
+            "Ollama executable still could not be launched after path resolution. "
+            "Set an absolute local.ollamaPath in config.properties, e.g. "
+            "C:\\Users\\<you>\\AppData\\Local\\Programs\\Ollama\\ollama.exe"
         ) from ex
 
     if proc.returncode != 0:

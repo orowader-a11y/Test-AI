@@ -64,6 +64,8 @@ Edit `config.properties`:
 local.provider=ollama
 local.model=llama3.1:8b
 local.ollamaCommand=ollama
+# optional absolute path, useful when .exe PATH does not include Ollama
+local.ollamaPath=
 local.temperature=0.1
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
@@ -84,6 +86,24 @@ build_exe.bat
 
 Expected executable:
 - `dist\FrontendZipSecurityAnalyzer.exe`
+
+
+## Troubleshooting: "Ollama command not found"
+If Ollama works in your terminal but fails from the app/.exe, the process PATH is likely different.
+
+Set an explicit absolute path in `config.properties`:
+
+```properties
+local.ollamaPath=C:\Users\<you>\AppData\Local\Programs\Ollama\ollama.exe
+```
+
+The app now tries, in order:
+1. `local.ollamaPath` (if set)
+2. `local.ollamaCommand`
+3. `PATH` lookup
+4. common install locations
+
+This issue is unrelated to ZIP file paths; ZIP handling happens after the Ollama executable is resolved.
 
 ## UI update
 The UI was redesigned in a SonarQube-inspired style:
