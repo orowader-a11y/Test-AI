@@ -232,6 +232,59 @@ def parse_json_from_text(raw_text: str) -> dict:
     raise ValueError("Could not parse JSON from model output.")
 
 
+def infer_severity_from_text(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(token in lowered for token in ["rce", "critical", "account takeover", "secret", "token leak"]):
+        return "High"
+    if any(token in lowered for token in ["xss", "csrf", "redirect", "injection", "bypass"]):
+        return "Medium"
+    return "Low"
+
+
+def build_fallback_result_from_text(raw_text: str, payload: dict) -> dict:
+    lines = [line.strip(" -	") for line in (raw_text or "").splitlines() if line.strip()]
+    issues = []
+    marker = "potential security concerns"
+    in_concerns = False
+
+    for line in lines:
+        lowered = line.lower()
+        if marker in lowered:
+            in_concerns = True
+            continue
+        if in_concerns and (line.startswith("To address") or line.startswith("Note:")):
+            break
+
+        match = re.match(r"^(?:\d+[\.)]\s*)?(?:\*\*)?(.+?)(?:\*\*)?:\s*(.*)$", line)
+        if not match:
+            continue
+
+        title = match.group(1).strip()
+        detail = match.group(2).strip() or "Potential issue inferred from model prose output."
+
+        if in_concerns or any(key in lowered for key in ["concern", "risk", "xss", "secret", "token", "auth", "endpoint"]):
+            issues.append(
+                {
+                    "file": "unknown",
+                    "line_number": 1,
+                    "id": f"ISSUE-{len(issues)+1:03d}",
+                    "title": title[:120],
+                    "severity": infer_severity_from_text(f"{title} {detail}"),
+                    "offending_code": "",
+                    "why_this_is_a_problem": detail,
+                    "suggested_fix": "Review this finding in source context and apply secure coding controls.",
+                }
+            )
+
+    result = {
+        "overall_security_grade_percent": 0 if issues else 50,
+        "certainty_percent": 35,
+        "files_analyzed": int(payload.get("files_analyzed", 0)),
+        "issues": issues,
+    }
+    return ensure_output_shape(result, payload)
+
+
 def ensure_output_shape(result: dict, fallback_summary: dict) -> dict:
     out = {
         "overall_security_grade_percent": int(result.get("overall_security_grade_percent", 0)),
@@ -267,7 +320,8 @@ def build_analysis_prompt(payload: dict) -> str:
         "2) severity must be one of Low/Medium/High/Critical.\n"
         "3) Include concrete offending_code snippets whenever possible.\n"
         "4) line_number should be best estimate from provided file content.\n"
-        "5) No markdown, no comments, JSON only.\n\n"
+        "5) No markdown, no comments, JSON only.\n"
+        "6) Output must start with { and end with }.\n\n"
         f"ZIP_SUMMARY:\n{json.dumps(payload)}"
     )
 
@@ -275,41 +329,58 @@ def build_analysis_prompt(payload: dict) -> str:
 def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload)}"
     ollama_exec = resolve_ollama_executable(config)
-    cmd = [
-        ollama_exec,
-        "run",
-        config.local_model,
-    ]
 
     env = os.environ.copy()
     if os.name == "nt":
         env["PATHEXT"] = env.get("PATHEXT", ".EXE;.BAT;.CMD")
 
+    commands = [
+        [ollama_exec, "run", config.local_model, "--format", "json"],
+        [ollama_exec, "run", config.local_model],
+    ]
+
+    proc = None
+    last_error = ""
+    for idx, cmd in enumerate(commands):
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+                check=False,
+                cwd=str(app_base_dir()),
+                env=env,
+            )
+        except FileNotFoundError as ex:
+            raise RuntimeError(
+                "Ollama executable still could not be launched after path resolution. "
+                "Set an absolute local.ollamaPath in config.properties, e.g. "
+                "C:\\Users\\<you>\\AppData\\Local\\Programs\\Ollama\\ollama.exe"
+            ) from ex
+
+        if proc.returncode == 0:
+            break
+
+        stderr_out = (proc.stderr or "").lower()
+        if idx == 0 and ("unknown flag" in stderr_out or "unknown shorthand flag" in stderr_out):
+            continue
+
+        last_error = proc.stderr.strip() or proc.stdout.strip()
+        raise RuntimeError(f"Ollama failed ({proc.returncode}): {last_error}")
+
+    if proc is None:
+        raise RuntimeError(f"Ollama failed: {last_error or 'Unknown launch error.'}")
+
     try:
-        proc = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            check=False,
-            cwd=str(app_base_dir()),
-            env=env,
-        )
-    except FileNotFoundError as ex:
-        raise RuntimeError(
-            "Ollama executable still could not be launched after path resolution. "
-            "Set an absolute local.ollamaPath in config.properties, e.g. "
-            "C:\\Users\\<you>\\AppData\\Local\\Programs\\Ollama\\ollama.exe"
-        ) from ex
+        parsed = parse_json_from_text(proc.stdout)
+        fixed = ensure_output_shape(parsed, payload)
+    except Exception:
+        fixed = build_fallback_result_from_text(proc.stdout, payload)
 
-    if proc.returncode != 0:
-        raise RuntimeError(f"Ollama failed ({proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
-
-    parsed = parse_json_from_text(proc.stdout)
-    fixed = ensure_output_shape(parsed, payload)
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:
         if issue["line_number"] == 1 and issue["offending_code"] and issue["file"] in file_content:
