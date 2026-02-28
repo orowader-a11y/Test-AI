@@ -94,6 +94,30 @@ BOOTSTRAP_FEWSHOT_EXAMPLES = [
         "risk": "Session token written via JS cookie",
         "fix": "Set session cookies from server with HttpOnly + Secure + SameSite.",
     },
+    {
+        "file": "src/router/redirect.ts",
+        "code": "router.push(query.next);",
+        "risk": "Unvalidated redirect target",
+        "fix": "Restrict redirects to same-origin/allowlisted routes.",
+    },
+    {
+        "file": "src/sanitize/unsafe.tsx",
+        "code": "element.outerHTML = userGeneratedHtml;",
+        "risk": "Unsafe HTML sink (outerHTML)",
+        "fix": "Avoid HTML sinks or sanitize with strict allowlist sanitizer.",
+    },
+    {
+        "file": "src/transport/ws.js",
+        "code": "socket.send(JSON.stringify({ token }));",
+        "risk": "Potential token exposure over client channel",
+        "fix": "Avoid sending raw session tokens in client message payloads.",
+    },
+    {
+        "file": "src/bootstrap/init.js",
+        "code": "window.addEventListener('message', (e) => handle(e.data));",
+        "risk": "postMessage receiver missing origin validation",
+        "fix": "Verify `e.origin` against trusted origins before handling messages.",
+    },
 ]
 
 @dataclass
@@ -137,7 +161,7 @@ def load_properties(path: str) -> AppConfig:
         max_files=int(values.get("analysis.maxFiles", "300")),
         max_bytes_per_file=int(values.get("analysis.maxBytesPerFile", "9000")),
         max_total_chars=int(values.get("analysis.maxTotalChars", "180000")),
-        learning_examples=int(values.get("learning.maxExamples", "6")),
+        learning_examples=int(values.get("learning.maxExamples", "12")),
         openai_model=values.get("openai.model", "gpt-4o-mini"),
         openai_api_key_env=values.get("openai.apiKeyEnv", "OPENAI_API_KEY"),
         openai_base_url=values.get("openai.baseUrl", "https://api.openai.com/v1/chat/completions"),
@@ -467,6 +491,36 @@ def ensure_output_shape(result: dict, fallback_summary: dict) -> dict:
     return out
 
 
+def resolve_issue_locations(result: dict, payload: dict) -> dict:
+    file_content = {str(item.get("path", "")): str(item.get("content", "")) for item in payload.get("files", [])}
+    candidates = list(file_content.items())
+
+    resolved = []
+    for issue in result.get("issues", []):
+        cloned = dict(issue)
+        file_name = str(cloned.get("file", "unknown")).strip()
+        code = str(cloned.get("offending_code", "")).strip()
+        why = str(cloned.get("why_this_is_a_problem", "")).strip()
+
+        if (not file_name or file_name.lower() == "unknown") and code:
+            match_path = ""
+            for path, content in candidates:
+                if code and code in content:
+                    match_path = path
+                    break
+            if match_path:
+                cloned["file"] = match_path
+                cloned["line_number"] = guess_line_number(file_content.get(match_path, ""), code)
+
+        if cloned.get("file", "unknown").lower() == "unknown" and not code and not why:
+            continue
+
+        resolved.append(cloned)
+
+    result["issues"] = resolved
+    return result
+
+
 def _make_issue(file_path: str, line_number: int, idx: int, title: str, severity: str, code: str, why: str, fix: str) -> dict:
     return {
         "file": file_path,
@@ -756,8 +810,10 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
         "2) severity must be one of Low/Medium/High/Critical.\n"
         "3) Include concrete offending_code snippets whenever possible.\n"
         "4) line_number should be best estimate from provided file content.\n"
+        "4.1) file must be a real file path from ZIP_SUMMARY files; never output 'unknown' when code snippet maps to a file.\n"
         "5) No markdown, no comments, JSON only.\n"
         "6) Output must start with { and end with }.\n\n"
+        "7) Prefer precision over quantity; skip low-confidence items without evidence snippet/location.\n\n"
         f"ZIP_SUMMARY:\n{json.dumps(payload)}\n\n"
         f"{learning_context}"
     )
@@ -887,6 +943,7 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
         payload,
         tools_used + (["chatgpt"] if chatgpt_issues else []),
     )
+    fixed = resolve_issue_locations(fixed, payload)
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:

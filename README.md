@@ -76,7 +76,7 @@ openai.baseUrl=https://api.openai.com/v1/chat/completions
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
 analysis.maxTotalChars=180000
-learning.maxExamples=6
+learning.maxExamples=12
 ```
 
 ## Run in development
@@ -136,7 +136,7 @@ You can iteratively improve local results without cloud training:
 - Findings are persisted into `learning_memory.json` without manual action
 - Future runs inject these examples into prompt context and also match learned patterns directly in code
 
-On the **first run only**, the app also injects a built-in bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, hardcoded secrets, open redirects, etc.) so the local model starts with calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
+On the **first run only**, the app injects an expanded bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, missing origin checks, hardcoded secrets, open redirects, unsafe HTML sinks, etc.) so the local model starts with stronger calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
 
 This is lightweight memory-based learning (few-shot + pattern reuse), not full model weight fine-tuning.
 
