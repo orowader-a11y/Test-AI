@@ -479,6 +479,35 @@ def _tool_issue_key(issue: dict) -> tuple[str, int, str]:
     )
 
 
+def _normalize_issue_title(title: str) -> str:
+    clean = (title or "").strip()
+    clean = re.sub(r"^\[[^\]]+\]\s*", "", clean)
+    clean = re.sub(r"^learned pattern match:\s*", "", clean, flags=re.IGNORECASE)
+    return clean.strip()
+
+
+def _issue_dedupe_key(issue: dict) -> tuple[str, int, str, str]:
+    code = re.sub(r"\s+", " ", str(issue.get("offending_code", "")).strip().lower())
+    return (
+        str(issue.get("file", "unknown")).strip().lower(),
+        max(1, int(issue.get("line_number", 1) or 1)),
+        _normalize_issue_title(str(issue.get("title", "")).lower()),
+        code[:140],
+    )
+
+
+def dedupe_issues(issues: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for issue in issues:
+        key = _issue_dedupe_key(issue)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+    return deduped
+
+
 def _run_regex_tool(tool_name: str, payload: dict, patterns: list[tuple[re.Pattern, str, str, str, str]]) -> list[dict]:
     issues = []
     for item in payload.get("files", []):
@@ -597,6 +626,7 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
     ]
 
     issues = []
+    seen = set()
     for item in payload.get("files", []):
         file_path = str(item.get("path", "unknown"))
         content = item.get("content") or ""
@@ -607,7 +637,12 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
             for match in regex.finditer(content):
                 line = content.count("\n", 0, match.start()) + 1
                 code_line = content[match.start() : match.start() + 180].splitlines()[0].strip()
-                issues.append(_make_issue(file_path, line, len(issues) + 1, title, severity, code_line, why, fix))
+                issue = _make_issue(file_path, line, len(issues) + 1, title, severity, code_line, why, fix)
+                key = _issue_dedupe_key(issue)
+                if key in seen:
+                    continue
+                seen.add(key)
+                issues.append(issue)
                 if len(issues) >= 120:
                     return issues
 
@@ -626,51 +661,68 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
             if idx < 0:
                 continue
             line = content.count("\n", 0, idx) + 1
-            issues.append(
-                _make_issue(
-                    file_path,
-                    line,
-                    len(issues) + 1,
-                    f"Learned pattern match: {learned.get('title', 'Historical finding')}",
-                    learned.get("severity", "Medium"),
-                    pattern,
-                    learned.get("why", "Matched a previously observed risky pattern."),
-                    learned.get("fix", "Apply mitigation used for this known risky pattern."),
-                )
+            issue = _make_issue(
+                file_path,
+                line,
+                len(issues) + 1,
+                learned.get("title", "Historical finding"),
+                learned.get("severity", "Medium"),
+                pattern,
+                learned.get("why", "Matched a previously observed risky pattern."),
+                learned.get("fix", "Apply mitigation used for this known risky pattern."),
             )
+            key = _issue_dedupe_key(issue)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(issue)
             if len(issues) >= 150:
                 return issues
 
     return issues
 
 
-def merge_and_score_results(model_result: dict, heuristic_issues: list[dict], fallback_summary: dict) -> dict:
+def merge_and_score_results(
+    model_result: dict,
+    heuristic_issues: list[dict],
+    tool_issues: list[dict],
+    fallback_summary: dict,
+    tools_used: list[str],
+) -> dict:
     merged = ensure_output_shape(model_result, fallback_summary)
 
-    seen = {
-        (i.get("file", ""), int(i.get("line_number", 1) or 1), i.get("title", "").strip().lower())
-        for i in merged.get("issues", [])
-    }
-    next_id = len(merged["issues"]) + 1
-    for issue in heuristic_issues:
-        key = (issue["file"], int(issue["line_number"]), issue["title"].strip().lower())
-        if key in seen:
-            continue
-        cloned = dict(issue)
-        cloned["id"] = f"ISSUE-{next_id:03d}"
-        next_id += 1
-        merged["issues"].append(cloned)
-        seen.add(key)
+    combined = merged.get("issues", []) + heuristic_issues + tool_issues
+    deduped = dedupe_issues(combined)
 
-    if merged["issues"]:
-        weights = {"Low": 1, "Medium": 2, "High": 3, "Critical": 4}
-        total_weight = sum(weights.get(i.get("severity", "Medium"), 2) for i in merged["issues"])
-        penalty = min(90, total_weight * 3)
-        merged["overall_security_grade_percent"] = max(5, 100 - penalty)
-        merged["certainty_percent"] = max(55, int(merged.get("certainty_percent", 0) or 0))
+    normalized = []
+    for idx, issue in enumerate(deduped, start=1):
+        cloned = dict(issue)
+        cloned["id"] = f"ISSUE-{idx:03d}"
+        cloned["title"] = _normalize_issue_title(cloned.get("title", "Potential security issue"))
+        normalized.append(cloned)
+    merged["issues"] = normalized
+
+    issue_count = len(merged["issues"])
+    if issue_count:
+        weights = {"Low": 1.0, "Medium": 2.2, "High": 3.8, "Critical": 5.0}
+        weighted = sum(weights.get(i.get("severity", "Medium"), 2.2) for i in merged["issues"])
+        grade_penalty = min(94, int(weighted * 2.7 + issue_count * 0.8))
+        merged["overall_security_grade_percent"] = max(6, 100 - grade_penalty)
     else:
-        merged["overall_security_grade_percent"] = max(40, int(merged.get("overall_security_grade_percent", 0) or 0))
-        merged["certainty_percent"] = max(40, int(merged.get("certainty_percent", 0) or 0))
+        merged["overall_security_grade_percent"] = 98
+
+    model_issue_count = max(1, len(model_result.get("issues", [])))
+    tool_issue_count = len(tool_issues)
+    overlap = len({_issue_dedupe_key(i) for i in model_result.get("issues", [])} & {_issue_dedupe_key(i) for i in tool_issues})
+    agreement_ratio = overlap / max(1, tool_issue_count)
+    tool_coverage_ratio = min(1.0, tool_issue_count / max(1, issue_count))
+    files_analyzed = int(fallback_summary.get("files_analyzed", 0) or 0)
+    breadth = min(1.0, files_analyzed / 60)
+    tool_depth = min(1.0, len(tools_used) / 3)
+    certainty = int(35 + 20 * breadth + 20 * tool_depth + 15 * agreement_ratio + 10 * tool_coverage_ratio)
+    if issue_count == 0:
+        certainty = min(certainty, 72)
+    merged["certainty_percent"] = max(35, min(99, certainty))
 
     return merged
 
@@ -758,9 +810,9 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
-    tool_issues, _tools_used = run_internal_library_analyses(payload)
+    tool_issues, tools_used = run_internal_library_analyses(payload)
     learn_when_tools_outperform_model(model_result, tool_issues)
-    fixed = merge_and_score_results(model_result, heuristic_issues + tool_issues, payload)
+    fixed = merge_and_score_results(model_result, heuristic_issues, tool_issues, payload, tools_used)
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:

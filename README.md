@@ -120,6 +120,8 @@ Only the first 3 available analyzers are used per run.
 
 If tool findings are missed by the model, those misses are automatically added to learning memory so future model prompts include those patterns.
 
+The merge stage now de-duplicates overlapping findings (including learned-pattern repeats) and computes grade/certainty with a weighted formula that factors severity mix, analyzer breadth, and model/tool agreement.
+
 ## Continuous local learning
 You can iteratively improve local results without cloud training:
 - Run analysis
