@@ -1114,23 +1114,28 @@ class ZipSecurityApp:
         self.file_list.pack(fill="both", expand=True, pady=(6, 0))
 
         ttk.Label(right, text="Findings", style="CardTitle.TLabel").pack(anchor="w")
-        # Findings table: header + scrollable body with grid of labels (severity column colored only)
+        # Findings table: bordered header + scrollable body, grid cells, severity column colored only
         self._findings_col_widths = (90, 90, 260, 70, 380)
-        self._findings_header = ttk.Frame(right, style="Card.TFrame")
+        self._findings_table_wrapper = Frame(right, bg="#d1d5db", relief="solid", bd=1)
+        self._findings_table_wrapper.pack(fill=BOTH, expand=True, pady=(6, 8))
+        self._findings_header = Frame(self._findings_table_wrapper, bg="#e5e7eb", height=28)
         self._findings_header.pack(fill="x")
+        self._findings_header.pack_propagate(False)
         for c, (col_name, w) in enumerate(zip(("ID", "SEVERITY", "FILE", "LINE", "TITLE"), self._findings_col_widths)):
-            lbl = ttk.Label(self._findings_header, text=col_name, style="CardTitle.TLabel")
-            lbl.grid(row=0, column=c, sticky="w", padx=2, pady=(0, 2))
+            cell = Frame(self._findings_header, bg="#f3f4f6", relief="solid", bd=1)
+            cell.grid(row=0, column=c, sticky="nsew")
+            lbl = Label(cell, text=col_name, anchor="w", bg="#f3f4f6", fg="#374151", font=("Segoe UI", 9, "bold"), padx=6, pady=4)
+            lbl.pack(fill=BOTH, expand=True)
             self._findings_header.columnconfigure(c, minsize=w)
-        self._findings_canvas = Canvas(right, bg="#ffffff", highlightthickness=0)
-        self._findings_scroll = ttk.Scrollbar(right)
+        self._findings_canvas = Canvas(self._findings_table_wrapper, bg="#d1d5db", highlightthickness=0)
+        self._findings_scroll = ttk.Scrollbar(self._findings_table_wrapper)
         self._findings_body = Frame(self._findings_canvas, bg="#ffffff")
         self._findings_body_id = self._findings_canvas.create_window((0, 0), window=self._findings_body, anchor="nw")
         self._findings_canvas.configure(yscrollcommand=self._findings_scroll.set)
         self._findings_scroll.configure(command=self._findings_canvas.yview)
-        self._findings_canvas.pack(fill=BOTH, expand=True, pady=(0, 8))
-        self._findings_scroll.pack(side="right", fill="y", pady=(0, 8))
-        self._findings_row_frames: list[tuple[Frame, list[Label], str]] = []  # (row_frame, cell_labels, key)
+        self._findings_canvas.pack(fill=BOTH, expand=True)
+        self._findings_scroll.pack(side="right", fill="y")
+        self._findings_row_frames: list[tuple[Frame, list[tuple[Frame, Label]], str]] = []  # (row_frame, [(cell_frame, label), ...], key)
         self._findings_selected_row: int | None = None
         self._findings_canvas.bind("<Configure>", self._on_findings_canvas_configure)
         self._findings_body.bind("<Configure>", self._on_findings_body_configure)
@@ -1176,17 +1181,16 @@ class ZipSecurityApp:
         return colors.get(sev, ("#ea580c", "white"))
 
     def _on_findings_row_click(self, key: str):
-        row_index = int(key.split("-")[1]) - 1
-        for i, (frame, labels, k) in enumerate(self._findings_row_frames):
-            if k == key:
-                for j, lbl in enumerate(labels):
-                    if j != 1:
+        for _i, (_frame, cells, k) in enumerate(self._findings_row_frames):
+            for j, (cell_frame, lbl) in enumerate(cells):
+                if j != 1:
+                    if k == key:
+                        cell_frame.configure(bg="#e3f2fd")
                         lbl.configure(bg="#e3f2fd")
-            else:
-                for j, lbl in enumerate(labels):
-                    if j != 1:
+                    else:
+                        cell_frame.configure(bg="#ffffff")
                         lbl.configure(bg="#ffffff")
-        self._findings_selected_row = row_index
+        self._findings_selected_row = int(key.split("-")[1]) - 1
         issue_info = self.issue_lookup.get(key)
         if not issue_info:
             return
@@ -1320,10 +1324,12 @@ class ZipSecurityApp:
 
         self._clear_findings_table()
         cell_font = ("Segoe UI", 9)
+        row_height = 26
         for row_index, (issue, zip_path) in enumerate(flat, start=1):
             key = f"issue-{row_index}"
-            row_frame = Frame(self._findings_body, bg="#ffffff", cursor="hand2")
+            row_frame = Frame(self._findings_body, bg="#ffffff", cursor="hand2", height=row_height)
             row_frame.grid(row=row_index - 1, column=0, sticky="ew")
+            row_frame.grid_propagate(False)
             self._findings_body.columnconfigure(0, weight=1)
             vals = (
                 issue.get("id", ""),
@@ -1333,27 +1339,30 @@ class ZipSecurityApp:
                 issue.get("title", ""),
             )
             sev_bg, sev_fg = self._severity_cell_colors(issue)
-            labels = []
+            cells = []
             for c, (w, val) in enumerate(zip(self._findings_col_widths, vals)):
                 bg = sev_bg if c == 1 else "#ffffff"
                 fg = sev_fg if c == 1 else "#202124"
+                cell_frame = Frame(row_frame, bg=bg, relief="solid", bd=1, highlightbackground="#e5e7eb")
+                cell_frame.grid(row=0, column=c, sticky="nsew", padx=0, pady=0)
                 lbl = Label(
-                    row_frame,
+                    cell_frame,
                     text=val,
                     anchor="w",
                     bg=bg,
                     fg=fg,
                     font=cell_font,
-                    padx=4,
-                    pady=3,
+                    padx=6,
+                    pady=2,
                 )
-                lbl.grid(row=0, column=c, sticky="ew", padx=1, pady=1)
+                lbl.pack(fill=BOTH, expand=True)
                 row_frame.columnconfigure(c, minsize=w)
-                labels.append(lbl)
-            row_frame.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
-            for lbl in labels:
+                cells.append((cell_frame, lbl))
+            for (cf, lbl) in cells:
+                cf.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
                 lbl.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
-            self._findings_row_frames.append((row_frame, labels, key))
+            row_frame.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+            self._findings_row_frames.append((row_frame, cells, key))
 
     def _poll_results(self):
         try:
