@@ -1114,19 +1114,36 @@ class ZipSecurityApp:
         self.file_list.pack(fill="both", expand=True, pady=(6, 0))
 
         ttk.Label(right, text="Findings", style="CardTitle.TLabel").pack(anchor="w")
-        # Findings table: bordered header + scrollable body, grid cells, severity column colored only
-        self._findings_col_widths = (90, 90, 260, 70, 380)
+        # Findings table: bordered header with drag-to-resize, scrollable body, uniform row width, severity column colored only
+        self._findings_col_widths = [90, 90, 260, 70, 380]
+        self._findings_min_col_width = 40
+        self._findings_resize_col: int | None = None
+        self._findings_resize_start_x: float = 0.0
+        self._findings_resize_start_width: int = 0
         self._findings_table_wrapper = Frame(right, bg="#d1d5db", relief="solid", bd=1)
         self._findings_table_wrapper.pack(fill=BOTH, expand=True, pady=(6, 8))
         self._findings_header = Frame(self._findings_table_wrapper, bg="#e5e7eb", height=28)
         self._findings_header.pack(fill="x")
         self._findings_header.pack_propagate(False)
-        for c, (col_name, w) in enumerate(zip(("ID", "SEVERITY", "FILE", "LINE", "TITLE"), self._findings_col_widths)):
+        for c, col_name in enumerate(("ID", "SEVERITY", "FILE", "LINE", "TITLE")):
+            w = self._findings_col_widths[c]
             cell = Frame(self._findings_header, bg="#f3f4f6", relief="solid", bd=1)
             cell.grid(row=0, column=c, sticky="nsew")
             lbl = Label(cell, text=col_name, anchor="w", bg="#f3f4f6", fg="#374151", font=("Segoe UI", 9, "bold"), padx=6, pady=4)
-            lbl.pack(fill=BOTH, expand=True)
+            lbl.pack(side="left", fill=BOTH, expand=True)
+            if c < len(self._findings_col_widths) - 1:
+                grip = Frame(cell, bg="#d1d5db", width=4, cursor="sb_h_double_arrow")
+                grip.pack(side="right", fill="y", padx=0)
+                grip.pack_propagate(False)
+                grip.bind("<Button-1>", lambda e, col=c: self._findings_resize_start(e, col))
+            else:
+                grip = Frame(cell, bg="#d1d5db", width=4, cursor="sb_h_double_arrow")
+                grip.pack(side="right", fill="y", padx=0)
+                grip.pack_propagate(False)
+                grip.bind("<Button-1>", lambda e, col=c: self._findings_resize_start(e, col))
             self._findings_header.columnconfigure(c, minsize=w)
+        self.root.bind("<B1-Motion>", self._findings_resize_motion)
+        self.root.bind("<ButtonRelease-1>", self._findings_resize_end)
         self._findings_canvas = Canvas(self._findings_table_wrapper, bg="#d1d5db", highlightthickness=0)
         self._findings_scroll = ttk.Scrollbar(self._findings_table_wrapper)
         self._findings_body = Frame(self._findings_canvas, bg="#ffffff")
@@ -1168,6 +1185,56 @@ class ZipSecurityApp:
 
     def _on_findings_body_configure(self, _event=None):
         self._findings_canvas.configure(scrollregion=self._findings_canvas.bbox("all"))
+
+    def _truncate_cell_text(self, text: str, pixel_width: int) -> str:
+        """Truncate text to fit within pixel width (approx 7px per char for Segoe UI 9pt)."""
+        if not text:
+            return ""
+        pad = 12
+        n = max(1, (pixel_width - pad) // 7)
+        s = str(text)
+        return (s[: n - 3] + "...") if len(s) > n else s
+
+    def _findings_resize_start(self, event, col: int):
+        self._findings_resize_col = col
+        self._findings_resize_start_x = event.x_root
+        self._findings_resize_start_width = self._findings_col_widths[col]
+
+    def _findings_resize_motion(self, event):
+        if self._findings_resize_col is None:
+            return
+        delta = event.x_root - self._findings_resize_start_x
+        new_w = max(self._findings_min_col_width, self._findings_resize_start_width + int(delta))
+        if new_w == self._findings_col_widths[self._findings_resize_col]:
+            return
+        self._findings_col_widths[self._findings_resize_col] = new_w
+        self._findings_resize_start_x = event.x_root
+        self._findings_resize_start_width = new_w
+        self._apply_findings_column_widths()
+
+    def _findings_resize_end(self, event):
+        self._findings_resize_col = None
+
+    def _apply_findings_column_widths(self):
+        """Apply current column widths to header and all body rows; retruncate cell text."""
+        for c, w in enumerate(self._findings_col_widths):
+            self._findings_header.columnconfigure(c, minsize=w)
+        for row_frame, cells, key in self._findings_row_frames:
+            issue, _ = self.issue_lookup.get(key, ({}, ""))
+            vals = (
+                issue.get("id", ""),
+                issue.get("severity", ""),
+                issue.get("file", ""),
+                str(issue.get("line_number", "")),
+                issue.get("title", ""),
+            )
+            for c, w in enumerate(self._findings_col_widths):
+                row_frame.columnconfigure(c, minsize=w)
+                _, lbl = cells[c]
+                txt = self._truncate_cell_text(vals[c], w)
+                lbl.configure(text=txt)
+        total_w = sum(self._findings_col_widths)
+        self._findings_body.configure(width=total_w)
 
     def _severity_cell_colors(self, issue: dict) -> tuple[str, str]:
         """Return (background, foreground) for severity column only."""
@@ -1325,6 +1392,8 @@ class ZipSecurityApp:
         self._clear_findings_table()
         cell_font = ("Segoe UI", 9)
         row_height = 26
+        total_table_width = sum(self._findings_col_widths)
+        self._findings_body.configure(width=total_table_width)
         for row_index, (issue, zip_path) in enumerate(flat, start=1):
             key = f"issue-{row_index}"
             row_frame = Frame(self._findings_body, bg="#ffffff", cursor="hand2", height=row_height)
@@ -1340,14 +1409,16 @@ class ZipSecurityApp:
             )
             sev_bg, sev_fg = self._severity_cell_colors(issue)
             cells = []
-            for c, (w, val) in enumerate(zip(self._findings_col_widths, vals)):
+            for c, w in enumerate(self._findings_col_widths):
+                val = vals[c]
+                display_text = self._truncate_cell_text(val, w)
                 bg = sev_bg if c == 1 else "#ffffff"
                 fg = sev_fg if c == 1 else "#202124"
                 cell_frame = Frame(row_frame, bg=bg, relief="solid", bd=1, highlightbackground="#e5e7eb")
                 cell_frame.grid(row=0, column=c, sticky="nsew", padx=0, pady=0)
                 lbl = Label(
                     cell_frame,
-                    text=val,
+                    text=display_text,
                     anchor="w",
                     bg=bg,
                     fg=fg,
