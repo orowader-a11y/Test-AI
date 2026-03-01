@@ -1119,6 +1119,10 @@ class ZipSecurityApp:
         for col, width in [("id", 90), ("severity", 90), ("file", 260), ("line", 70), ("title", 380)]:
             self.issues_tree.heading(col, text=col.upper())
             self.issues_tree.column(col, width=width, anchor="w")
+        self.issues_tree.tag_configure("critical", background="#b91c1c", foreground="white")
+        self.issues_tree.tag_configure("high", background="#dc2626", foreground="white")
+        self.issues_tree.tag_configure("medium", background="#ea580c", foreground="white")
+        self.issues_tree.tag_configure("low", background="#eab308", foreground="#1f2937")
         self.issues_tree.pack(fill="x", pady=(6, 8))
         self.issues_tree.bind("<<TreeviewSelect>>", self._on_issue_selected)
 
@@ -1224,29 +1228,45 @@ class ZipSecurityApp:
         self.selected_issue = None
         self.selected_issue_zip = ""
 
+    def _severity_sort_key(self, issue: dict) -> int:
+        """Order: Critical=0, High=1, Medium=2, Low=3 (most severe first)."""
+        order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+        return order.get(str(issue.get("severity", "Medium")).title(), 2)
+
+    def _severity_tag(self, issue: dict) -> str:
+        """Tag name for Treeview row styling (critical, high, medium, low)."""
+        sev = str(issue.get("severity", "Medium")).title()
+        if sev not in ("Critical", "High", "Medium", "Low"):
+            return "medium"
+        return sev.lower()
+
     def _refresh_dashboard(self, aggregate_results: list[dict]):
         if not aggregate_results:
             return
 
         first = aggregate_results[0]["result"]
-        all_issues = []
-        self.issue_lookup = {}
-        row_index = 0
+        # Collect (issue, zip_path) then sort by severity (Critical first, then High, Medium, Low)
+        flat = []
         for item in aggregate_results:
             zip_path = str(item.get("zip", ""))
             for issue in item["result"].get("issues", []):
-                row_index += 1
-                key = f"issue-{row_index}"
-                self.issue_lookup[key] = (issue, zip_path)
-                all_issues.append((key, issue))
+                flat.append((issue, zip_path))
+        flat.sort(key=lambda x: self._severity_sort_key(x[0]))
+
+        self.issue_lookup = {}
+        for row_index, (issue, zip_path) in enumerate(flat, start=1):
+            key = f"issue-{row_index}"
+            self.issue_lookup[key] = (issue, zip_path)
 
         self.grade.set(f"{first.get('overall_security_grade_percent', 0)}%")
         self.certainty.set(f"{first.get('certainty_percent', 0)}%")
         self.files_count.set(str(sum(item["result"].get("files_analyzed", 0) for item in aggregate_results)))
-        self.issue_count.set(str(len(all_issues)))
+        self.issue_count.set(str(len(flat)))
 
         self._clear_findings_table()
-        for key, issue in all_issues:
+        for row_index, (issue, zip_path) in enumerate(flat, start=1):
+            key = f"issue-{row_index}"
+            tag = self._severity_tag(issue)
             self.issues_tree.insert(
                 "",
                 END,
@@ -1258,6 +1278,7 @@ class ZipSecurityApp:
                     issue.get("line_number", ""),
                     issue.get("title", ""),
                 ),
+                tags=(tag,),
             )
 
     def _on_issue_selected(self, _event=None):
