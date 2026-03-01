@@ -13,7 +13,7 @@ import urllib.request
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import END, StringVar, Tk, filedialog, messagebox, ttk
+from tkinter import END, DoubleVar, StringVar, Toplevel, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 CONFIG_FILE = "config.properties"
@@ -122,6 +122,7 @@ BOOTSTRAP_FEWSHOT_EXAMPLES = [
 
 @dataclass
 class AppConfig:
+    # Local runtime configuration.
     local_provider: str
     local_model: str
     ollama_command: str
@@ -134,6 +135,9 @@ class AppConfig:
     openai_model: str
     openai_api_key_env: str
     openai_base_url: str
+    claude_model: str
+    claude_api_key_env: str
+    claude_base_url: str
 
 
 def app_base_dir() -> Path:
@@ -143,6 +147,7 @@ def app_base_dir() -> Path:
 
 
 def load_properties(path: str) -> AppConfig:
+    """Load app settings from config.properties into a typed configuration object."""
     values = {}
     with open(path, "r", encoding="utf-8") as file:
         for line in file:
@@ -165,6 +170,9 @@ def load_properties(path: str) -> AppConfig:
         openai_model=values.get("openai.model", "gpt-4o-mini"),
         openai_api_key_env=values.get("openai.apiKeyEnv", "OPENAI_API_KEY"),
         openai_base_url=values.get("openai.baseUrl", "https://api.openai.com/v1/chat/completions"),
+        claude_model=values.get("claude.model", "claude-3-5-sonnet-20241022"),
+        claude_api_key_env=values.get("claude.apiKeyEnv", "ANTHROPIC_API_KEY"),
+        claude_base_url=values.get("claude.baseUrl", "https://api.anthropic.com/v1/messages"),
     )
 
 
@@ -575,8 +583,8 @@ def annotate_source_issues(issues: list[dict], source_tag: str) -> list[dict]:
     tagged = []
     for issue in issues:
         cloned = dict(issue)
-        if source_tag == "chatgpt":
-            cloned["title"] = f"[chatgpt] {cloned.get('title', 'Potential security issue')}"
+        if source_tag in {"chatgpt", "claude"}:
+            cloned["title"] = f"[{source_tag}] {cloned.get('title', 'Potential security issue')}"
         tagged.append(cloned)
     return tagged
 
@@ -687,6 +695,7 @@ def learn_when_tools_outperform_model(model_result: dict, tool_issues: list[dict
 
 
 def detect_static_security_issues(payload: dict, learning_entries: list[dict] | None = None) -> list[dict]:
+    """Regex-based high-recall vulnerability sweep used alongside model output."""
     patterns = [
         (re.compile(r"localStorage\.setItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token stored in localStorage", "High", "Client-side storage is readable by injected scripts.", "Use HttpOnly, Secure cookies and short-lived server-managed sessions."),
         (re.compile(r'postMessage\([^\n]{0,200},\s*(?:"|\')\*(?:"|\')', re.IGNORECASE), "postMessage uses wildcard target origin", "High", "Using '*' as target origin can leak data to untrusted origins.", "Set an explicit trusted origin and validate message source/origin on receipt."),
@@ -696,6 +705,15 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
         (re.compile(r"location\.(href|assign|replace)\s*=", re.IGNORECASE), "Potential open redirect sink", "Medium", "Redirect destinations may be attacker-controlled if not validated.", "Allowlist destinations and reject external/untrusted redirect targets."),
         (re.compile(r"document\.cookie\s*=", re.IGNORECASE), "Client-side cookie write detected", "Medium", "Cookies set from JS cannot be HttpOnly and are exposed to XSS.", "Prefer server-set Secure/HttpOnly cookies for sensitive session tokens."),
         (re.compile(r"eval\s*\(|new\s+Function\s*\(", re.IGNORECASE), "Dynamic code execution pattern", "High", "eval/new Function can execute attacker-influenced code.", "Remove dynamic code execution and use safe parsing/dispatch mechanisms."),
+        (re.compile(r"outerHTML\s*=", re.IGNORECASE), "Direct outerHTML assignment", "High", "outerHTML assignment is a powerful DOM injection sink.", "Avoid outerHTML for untrusted data; use safe DOM APIs."),
+        (re.compile(r"window\.addEventListener\(\s*['\"]message['\"]", re.IGNORECASE), "postMessage listener detected", "Medium", "Message listeners must validate sender origin.", "Validate event.origin against explicit trusted origins before processing."),
+        (re.compile(r"(fetch|axios\.|XMLHttpRequest)[^\n]{0,200}(http://)", re.IGNORECASE), "Insecure HTTP transport", "High", "Plain HTTP can leak sensitive traffic and tokens.", "Use HTTPS endpoints and enforce transport security."),
+        (re.compile(r"(token|secret|api[_-]?key)[^\n]{0,120}(console\.log|alert)\(", re.IGNORECASE), "Sensitive value exposed to debug output", "Medium", "Logging secrets/tokens may expose credentials in logs/devtools.", "Remove sensitive debug logs and redact credentials."),
+        (re.compile(r"(router\.push|navigate|location\.(href|assign|replace))\([^\n]{0,120}(next|redirect|returnUrl)", re.IGNORECASE), "Unvalidated redirect parameter", "Medium", "User-controlled redirect params can cause phishing/open-redirect paths.", "Allowlist redirect targets and block external destinations."),
+        (re.compile(r"setTimeout\(\s*['\"]", re.IGNORECASE), "String-based setTimeout execution", "Medium", "String-based timers behave like eval and can execute unintended code.", "Pass function references instead of executable strings."),
+        (re.compile(r"localStorage\.getItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token read from localStorage", "Medium", "Frequent token retrieval in script context increases XSS impact.", "Prefer server-managed sessions and avoid token persistence in JS-readable stores."),
+        (re.compile(r"target=\"_blank\"", re.IGNORECASE), "target=_blank usage detected", "Low", "Without rel=noopener noreferrer this can expose window.opener risks.", "Add rel=\"noopener noreferrer\" to external links using target=_blank."),
+        (re.compile(r"dangerouslySetInnerHTML\s*=\s*\{\{\s*__html:\s*[^}]+\}\}", re.IGNORECASE), "Raw HTML render path", "High", "Raw HTML render paths are high-risk when source data is not strongly sanitized.", "Use trusted markdown renderer/sanitizer and enforce strict allowlist."),
     ]
 
     issues = []
@@ -822,6 +840,7 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
 
 
 def run_openai_chatgpt_analysis(config: AppConfig, prompt: str, payload: dict) -> dict | None:
+    """Optional ChatGPT cross-check. Returns normalized strict-shape JSON or None."""
     api_key = os.environ.get(config.openai_api_key_env, "").strip()
     if not api_key:
         return None
@@ -855,6 +874,51 @@ def run_openai_chatgpt_analysis(config: AppConfig, prompt: str, payload: dict) -
     try:
         parsed = json.loads(raw)
         text = parsed["choices"][0]["message"]["content"]
+        return ensure_output_shape(parse_json_from_text(text), payload)
+    except Exception:
+        return None
+
+
+def run_claude_analysis(config: AppConfig, prompt: str, payload: dict) -> dict | None:
+    """Optional Claude cross-check. Returns normalized strict-shape JSON or None."""
+    api_key = os.environ.get(config.claude_api_key_env, "").strip()
+    if not api_key:
+        return None
+
+    body = {
+        "model": config.claude_model,
+        "max_tokens": 2500,
+        "temperature": config.temperature,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    req = urllib.request.Request(
+        config.claude_base_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        content = parsed.get("content", [])
+        text = ""
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text += part.get("text", "")
+        if not text:
+            return None
         return ensure_output_shape(parse_json_from_text(text), payload)
     except Exception:
         return None
@@ -928,20 +992,24 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
 
     chatgpt_result = run_openai_chatgpt_analysis(config, analysis_prompt, payload)
     chatgpt_issues = annotate_source_issues(chatgpt_result.get("issues", []), "chatgpt") if chatgpt_result else []
+    claude_result = run_claude_analysis(config, analysis_prompt, payload)
+    claude_issues = annotate_source_issues(claude_result.get("issues", []), "claude") if claude_result else []
 
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
     tool_issues, tools_used = run_internal_library_analyses(payload)
 
-    merged_model_issues = dedupe_issues(model_result.get("issues", []) + chatgpt_issues)
-    merged_external_issues = dedupe_issues(tool_issues + chatgpt_issues)
+    cross_llm_issues = dedupe_issues(chatgpt_issues + claude_issues)
+    merged_model_issues = dedupe_issues(model_result.get("issues", []) + cross_llm_issues)
+    merged_external_issues = dedupe_issues(tool_issues + cross_llm_issues)
     learn_when_tools_outperform_model(model_result, merged_external_issues)
 
+    used_llms = ([] if not chatgpt_issues else ["chatgpt"]) + ([] if not claude_issues else ["claude"])
     fixed = merge_and_score_results(
         {**model_result, "issues": merged_model_issues},
         heuristic_issues,
-        tool_issues + chatgpt_issues,
+        tool_issues + cross_llm_issues,
         payload,
-        tools_used + (["chatgpt"] if chatgpt_issues else []),
+        tools_used + used_llms,
     )
     fixed = resolve_issue_locations(fixed, payload)
 
@@ -964,6 +1032,7 @@ def analyze_with_local_llm(config: AppConfig, payload: dict, zip_path: Path | No
 
 
 class ZipSecurityApp:
+    """Tk desktop app wrapper that orchestrates analysis, display, and fix-export workflows."""
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("Frontend ZIP Security Analyzer")
@@ -973,12 +1042,16 @@ class ZipSecurityApp:
         self.selected_files: list[Path] = []
         self.result_queue: queue.Queue = queue.Queue()
         self.results_cache = []
+        self.issue_lookup: dict[str, tuple[dict, str]] = {}
+        self.selected_issue: dict | None = None
+        self.selected_issue_zip: str = ""
 
         self.status = StringVar(value="Upload ZIP file(s) to run local-LLM frontend security analysis.")
         self.grade = StringVar(value="--")
         self.certainty = StringVar(value="--")
         self.files_count = StringVar(value="--")
         self.issue_count = StringVar(value="--")
+        self.progress = DoubleVar(value=0.0)
 
         self._build_ui()
         self._poll_results()
@@ -1020,8 +1093,12 @@ class ZipSecurityApp:
         controls.pack(fill="x", pady=(0, 10))
         ttk.Button(controls, text="Upload ZIP Files", style="Bubble.TButton", command=self.select_files).pack(side="left")
         ttk.Button(controls, text="Run Local Analysis", style="Bubble.TButton", command=self.run_analysis).pack(side="left", padx=8)
+        ttk.Button(controls, text="Configure Providers", style="Bubble.TButton", command=self.open_config_window).pack(side="left", padx=8)
         ttk.Button(controls, text="Export Visible JSON", style="Bubble.TButton", command=self.save_output).pack(side="left")
         ttk.Label(controls, textvariable=self.status, style="Sub.TLabel").pack(side="left", padx=12)
+
+        progress = ttk.Progressbar(container, mode="determinate", variable=self.progress, maximum=100)
+        progress.pack(fill="x", pady=(0, 10))
 
         main = ttk.Panedwindow(container, orient="horizontal")
         main.pack(fill="both", expand=True)
@@ -1044,7 +1121,12 @@ class ZipSecurityApp:
         self.issues_tree.pack(fill="x", pady=(6, 8))
         self.issues_tree.bind("<<TreeviewSelect>>", self._on_issue_selected)
 
-        ttk.Label(right, text="Issue Details", style="CardTitle.TLabel").pack(anchor="w")
+        details_header = ttk.Frame(right, style="Card.TFrame")
+        details_header.pack(fill="x")
+        ttk.Label(details_header, text="Issue Details", style="CardTitle.TLabel").pack(side="left", anchor="w")
+        self.fix_button = ttk.Button(details_header, text="Generate Fixed File", style="Bubble.TButton", command=self.generate_fix_for_selected_issue)
+        self.fix_button.pack(side="right")
+        self.fix_button.state(["disabled"])
         self.issue_details = ScrolledText(right, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=10, relief="flat", wrap="word")
         self.issue_details.pack(fill="x", pady=(6, 8))
 
@@ -1079,6 +1161,7 @@ class ZipSecurityApp:
         self.status.set(f"Loaded {len(self.selected_files)} ZIP file(s).")
 
     def run_analysis(self):
+        """Start async analysis and reset visible outputs/progress state."""
         if not self.selected_files:
             messagebox.showwarning("No files selected", "Please upload at least one ZIP file.")
             return
@@ -1089,37 +1172,55 @@ class ZipSecurityApp:
 
         config = load_properties(CONFIG_FILE)
         chatgpt_enabled = bool(os.environ.get(config.openai_api_key_env, "").strip())
-        mode_label = f"{config.local_provider}:{config.local_model}" + (" + chatgpt" if chatgpt_enabled else "")
+        claude_enabled = bool(os.environ.get(config.claude_api_key_env, "").strip())
+        extras = []
+        if chatgpt_enabled:
+            extras.append("chatgpt")
+        if claude_enabled:
+            extras.append("claude")
+        suffix = " + " + ",".join(extras) if extras else ""
+        mode_label = f"{config.local_provider}:{config.local_model}" + suffix
         self.status.set(f"Running local analysis via {mode_label}...")
         self.output.delete("1.0", END)
         self.human_output.delete("1.0", END)
         self.issue_details.delete("1.0", END)
+        self.progress.set(0)
         self._clear_findings_table()
         threading.Thread(target=self._analyze_worker, args=(config,), daemon=True).start()
 
     def _analyze_worker(self, config: AppConfig):
+        """Background worker: analyze each ZIP, emit progress, and return aggregate payload."""
         OUTPUT_DIR.mkdir(exist_ok=True)
         aggregate = []
         try:
-            for zip_path in self.selected_files:
+            total = max(1, len(self.selected_files))
+            for idx, zip_path in enumerate(self.selected_files, start=1):
+                base = ((idx - 1) / total) * 100
+                self.result_queue.put(("progress", {"percent": base, "message": f"Summarizing {zip_path.name}..."}))
                 summary = summarize_zip(
                     zip_path,
                     config.max_files,
                     config.max_bytes_per_file,
                     config.max_total_chars,
                 )
+                self.result_queue.put(("progress", {"percent": min(99, base + 60 / total), "message": f"Running model analysis for {zip_path.name}..."}))
                 result = analyze_with_local_llm(config, summary, zip_path)
                 outfile = OUTPUT_DIR / f"{zip_path.stem}.analysis.json"
                 outfile.write_text(json.dumps(result, indent=2), encoding="utf-8")
                 aggregate.append({"zip": str(zip_path), "output_json": str(outfile), "result": result})
+                self.result_queue.put(("progress", {"percent": (idx / total) * 100, "message": f"Completed {zip_path.name}"}))
             self.result_queue.put(("ok", aggregate))
         except Exception as ex:
             self.result_queue.put(("err", str(ex)))
 
     def _clear_findings_table(self):
+        """Clear current issue rows/details before a new scan or refresh."""
         for row in self.issues_tree.get_children():
             self.issues_tree.delete(row)
         self.issue_details.delete("1.0", END)
+        self.fix_button.state(["disabled"])
+        self.selected_issue = None
+        self.selected_issue_zip = ""
 
     def _refresh_dashboard(self, aggregate_results: list[dict]):
         if not aggregate_results:
@@ -1127,8 +1228,15 @@ class ZipSecurityApp:
 
         first = aggregate_results[0]["result"]
         all_issues = []
+        self.issue_lookup = {}
+        row_index = 0
         for item in aggregate_results:
-            all_issues.extend(item["result"].get("issues", []))
+            zip_path = str(item.get("zip", ""))
+            for issue in item["result"].get("issues", []):
+                row_index += 1
+                key = f"issue-{row_index}"
+                self.issue_lookup[key] = (issue, zip_path)
+                all_issues.append((key, issue))
 
         self.grade.set(f"{first.get('overall_security_grade_percent', 0)}%")
         self.certainty.set(f"{first.get('certainty_percent', 0)}%")
@@ -1136,10 +1244,11 @@ class ZipSecurityApp:
         self.issue_count.set(str(len(all_issues)))
 
         self._clear_findings_table()
-        for issue in all_issues:
+        for key, issue in all_issues:
             self.issues_tree.insert(
                 "",
                 END,
+                iid=key,
                 values=(
                     issue.get("id", ""),
                     issue.get("severity", ""),
@@ -1153,20 +1262,16 @@ class ZipSecurityApp:
         selected = self.issues_tree.selection()
         if not selected:
             return
-        values = self.issues_tree.item(selected[0], "values")
+        iid = selected[0]
+        values = self.issues_tree.item(iid, "values")
         if not values:
             return
-        issue_id = values[0]
-        issue = None
-        for pack in self.results_cache:
-            for candidate in pack.get("result", {}).get("issues", []):
-                if candidate.get("id") == issue_id:
-                    issue = candidate
-                    break
-            if issue:
-                break
-        if not issue:
+        issue_info = self.issue_lookup.get(iid)
+        if not issue_info:
             return
+        issue, issue_zip = issue_info
+        self.selected_issue = issue
+        self.selected_issue_zip = issue_zip
 
         title = issue.get("title", "")
         text = (
@@ -1183,6 +1288,10 @@ class ZipSecurityApp:
         )
         self.issue_details.delete("1.0", END)
         self.issue_details.insert(END, text)
+        if self.can_generate_fix(issue):
+            self.fix_button.state(["!disabled"])
+        else:
+            self.fix_button.state(["disabled"])
 
     def _render_human_readable(self, aggregate_results: list[dict]) -> str:
         lines = ["Frontend Security Analysis Report", "=" * 36, ""]
@@ -1222,21 +1331,143 @@ class ZipSecurityApp:
     def _poll_results(self):
         try:
             status, payload = self.result_queue.get_nowait()
+            if status == "progress":
+                self.progress.set(float(payload.get("percent", 0)))
+                self.status.set(payload.get("message", "Analyzing..."))
+                self.root.after(250, self._poll_results)
+                return
             if status == "ok":
                 self.results_cache = payload
                 self.status.set("Analysis complete.")
+                self.progress.set(100)
                 self._refresh_dashboard(payload)
                 self.output.insert(END, json.dumps(payload, indent=2))
                 self.human_output.insert(END, self._render_human_readable(payload))
                 learn_from_result_pack(payload)
             else:
                 self.status.set("Analysis failed.")
+                self.progress.set(0)
                 self.output.insert(END, payload)
                 self.human_output.insert(END, "Analysis failed before report generation.")
                 messagebox.showerror("Analysis failed", payload)
         except queue.Empty:
             pass
         self.root.after(250, self._poll_results)
+
+    def can_generate_fix(self, issue: dict) -> bool:
+        """Return True when the selected issue type has a deterministic auto-fix strategy."""
+        title = str(issue.get("title", "")).lower()
+        code = str(issue.get("offending_code", ""))
+        if "innerhtml" in title or "outerhtml" in title:
+            return True
+        if "postmessage" in title and "*" in code:
+            return True
+        if "target=_blank" in title or "target=\"_blank\"" in code:
+            return True
+        if "eval" in title or "new function" in title:
+            return True
+        return False
+
+    def apply_fix_to_content(self, content: str, issue: dict) -> str | None:
+        """Apply narrow, safe-by-default code transforms for fixable issue categories."""
+        title = str(issue.get("title", "")).lower()
+        code = str(issue.get("offending_code", ""))
+
+        if "innerhtml" in title:
+            return content.replace("innerHTML", "textContent")
+        if "outerhtml" in title:
+            return content.replace("outerHTML", "textContent")
+        if "postmessage" in title and "*" in code:
+            return content.replace(", '*'", ", window.location.origin").replace(', "*"', ", window.location.origin")
+        if "target=_blank" in title or 'target="_blank"' in code:
+            return content.replace('target="_blank"', 'target="_blank" rel="noopener noreferrer"')
+        if "eval" in title or "new function" in title:
+            return content.replace("eval(", "/* FIX_REQUIRED: removed eval */ (")
+        return None
+
+    def generate_fix_for_selected_issue(self):
+        """Generate a patched file for the selected issue when a deterministic fix exists."""
+        issue = self.selected_issue
+        zip_path = self.selected_issue_zip
+        if not issue or not zip_path:
+            messagebox.showinfo("No issue selected", "Select an issue with an available fix first.")
+            return
+        if not self.can_generate_fix(issue):
+            messagebox.showinfo("Fix unavailable", "No deterministic auto-fix is available for this issue type.")
+            return
+
+        file_path = str(issue.get("file", "")).strip()
+        if not file_path:
+            messagebox.showwarning("Missing file", "This issue has no file path and cannot be auto-fixed.")
+            return
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                raw = archive.read(file_path)
+            original = raw.decode("utf-8", errors="replace")
+        except Exception as ex:
+            messagebox.showerror("Fix generation failed", f"Could not read source file from ZIP: {ex}")
+            return
+
+        fixed = self.apply_fix_to_content(original, issue)
+        if not fixed or fixed == original:
+            messagebox.showinfo("No change", "Could not safely generate a changed file for this issue.")
+            return
+
+        zip_stem = Path(zip_path).stem
+        out_file = OUTPUT_DIR / "fixed" / zip_stem / file_path
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(fixed, encoding="utf-8")
+        messagebox.showinfo("Fixed file generated", f"Saved: {out_file}")
+
+    def open_config_window(self):
+        """Open a lightweight config editor for provider settings and persist to config.properties."""
+        config = load_properties(CONFIG_FILE)
+        win = Toplevel(self.root)
+        win.title("Configure Providers")
+        win.geometry("700x420")
+
+        fields = [
+            ("local.model", config.local_model),
+            ("local.ollamaCommand", config.ollama_command),
+            ("local.ollamaPath", config.ollama_path_hint),
+            ("openai.model", config.openai_model),
+            ("openai.apiKeyEnv", config.openai_api_key_env),
+            ("openai.baseUrl", config.openai_base_url),
+            ("claude.model", config.claude_model),
+            ("claude.apiKeyEnv", config.claude_api_key_env),
+            ("claude.baseUrl", config.claude_base_url),
+        ]
+        vars_map: dict[str, StringVar] = {}
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        for i, (k, v) in enumerate(fields):
+            ttk.Label(body, text=k).grid(row=i, column=0, sticky="w", pady=4)
+            var = StringVar(value=str(v))
+            vars_map[k] = var
+            ttk.Entry(body, textvariable=var, width=70).grid(row=i, column=1, sticky="ew", pady=4)
+        body.columnconfigure(1, weight=1)
+
+        def save_config():
+            lines = Path(CONFIG_FILE).read_text(encoding="utf-8").splitlines()
+            updates = {k: vars_map[k].get() for k, _ in fields}
+            out_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    out_lines.append(line)
+                    continue
+                key, _ = stripped.split("=", 1)
+                key = key.strip()
+                if key in updates:
+                    out_lines.append(f"{key}={updates[key]}")
+                else:
+                    out_lines.append(line)
+            Path(CONFIG_FILE).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+            messagebox.showinfo("Saved", "Configuration updated.")
+            win.destroy()
+
+        ttk.Button(body, text="Save", style="Bubble.TButton", command=save_config).grid(row=len(fields) + 1, column=1, sticky="e", pady=10)
 
     def save_output(self):
         content = self.output.get("1.0", END).strip()

@@ -3,7 +3,7 @@
 A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM**, and outputs strict JSON. It can optionally cross-check findings with ChatGPT when configured.
 
 ## Local-LLM approach
-This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider and optional **ChatGPT** cross-checking.
+This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider and optional **ChatGPT/Claude** cross-checking.
 
 - Local analysis runs by invoking `ollama run <model> <prompt>`.
 - Optional ChatGPT analysis can be enabled for side-by-side finding comparison by setting an API key environment variable.
@@ -72,6 +72,9 @@ local.temperature=0.1
 openai.model=gpt-4o-mini
 openai.apiKeyEnv=OPENAI_API_KEY
 openai.baseUrl=https://api.openai.com/v1/chat/completions
+claude.model=claude-3-5-sonnet-20241022
+claude.apiKeyEnv=ANTHROPIC_API_KEY
+claude.baseUrl=https://api.anthropic.com/v1/messages
 
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
@@ -124,7 +127,7 @@ Tool selection order:
 
 Only the first 3 available analyzers are used per run.
 
-The app can also query ChatGPT with the same prompt/temperature used for local analysis and merge those findings into the same output JSON shape when `OPENAI_API_KEY` (or configured env var) is present.
+The app can also query ChatGPT and Claude with the same prompt/temperature used for local analysis and merge those findings into the same output JSON shape when their respective API key env vars are present.
 
 ChatGPT findings are merged (not just compared) into the app result list with deduplication. Tool/ChatGPT findings missed by the local model are automatically added to learning memory so future model prompts include those patterns.
 
@@ -148,3 +151,7 @@ The UI now uses a lighter, friendlier style and includes:
 
 ## Windows UX note
 When launched as a GUI app (`pythonw`/PyInstaller `--windowed`), analysis now starts Ollama subprocesses with `CREATE_NO_WINDOW` on Windows so an extra command prompt window does not pop up during scanning.
+
+
+## Runtime config editing
+Use **Configure Providers** in the app UI to edit local/OpenAI/Claude provider settings via popup and save into `config.properties`.
