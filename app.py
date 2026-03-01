@@ -1068,6 +1068,7 @@ class ZipSecurityApp:
         style.configure("Sub.TLabel", background="#eef3fb", foreground="#5f6368", font=("Segoe UI", 10))
         style.configure("Bubble.TButton", background="#1a73e8", foreground="#ffffff", padding=(12, 8), borderwidth=0)
         style.map("Bubble.TButton", background=[("active", "#1967d2")])
+        style.configure("Horizontal.TProgressbar", background="#1a73e8", troughcolor="#e0e7f0", bordercolor="#e0e7f0", lightcolor="#1a73e8", darkcolor="#1557b0", thickness=12)
 
         container = ttk.Frame(self.root, style="Dark.TFrame", padding=14)
         container.pack(fill="both", expand=True)
@@ -1097,8 +1098,8 @@ class ZipSecurityApp:
         ttk.Button(controls, text="Export Visible JSON", style="Bubble.TButton", command=self.save_output).pack(side="left")
         ttk.Label(controls, textvariable=self.status, style="Sub.TLabel").pack(side="left", padx=12)
 
-        progress = ttk.Progressbar(container, mode="determinate", variable=self.progress, maximum=100)
-        progress.pack(fill="x", pady=(0, 10))
+        self.progress_bar = ttk.Progressbar(container, mode="determinate", variable=self.progress, maximum=100)
+        self.progress_bar.pack(fill="x", pady=(0, 10))
 
         main = ttk.Panedwindow(container, orient="horizontal")
         main.pack(fill="both", expand=True)
@@ -1127,22 +1128,22 @@ class ZipSecurityApp:
         self.fix_button = ttk.Button(details_header, text="Generate Fixed File", style="Bubble.TButton", command=self.generate_fix_for_selected_issue)
         self.fix_button.pack(side="right")
         self.fix_button.state(["disabled"])
-        self.issue_details = ScrolledText(right, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=10, relief="flat", wrap="word")
-        self.issue_details.pack(fill="x", pady=(6, 8))
-
-        self.output_tabs = ttk.Notebook(right)
-        self.output_tabs.pack(fill="both", expand=True)
-
-        human_tab = ttk.Frame(self.output_tabs, style="Card.TFrame")
-        json_tab = ttk.Frame(self.output_tabs, style="Card.TFrame")
-        self.output_tabs.add(human_tab, text="Human Readable Report")
-        self.output_tabs.add(json_tab, text="Raw JSON")
-
-        self.human_output = ScrolledText(human_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat", wrap="word")
-        self.human_output.pack(fill="both", expand=True, pady=(6, 0))
-
-        self.output = ScrolledText(json_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat", wrap="none")
-        self.output.pack(fill="both", expand=True, pady=(6, 0))
+        self.issue_details = ScrolledText(
+            right,
+            bg="#ffffff",
+            fg="#202124",
+            insertbackground="#202124",
+            height=14,
+            relief="flat",
+            wrap="word",
+            font=("Segoe UI", 10),
+        )
+        self.issue_details.pack(fill="both", expand=True, pady=(6, 8))
+        self.issue_details.tag_configure("title", font=("Segoe UI", 12, "bold"), foreground="#1a73e8")
+        self.issue_details.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#5f6368")
+        self.issue_details.tag_configure("body", font=("Segoe UI", 10), foreground="#202124")
+        self.issue_details.tag_configure("meta", font=("Segoe UI", 9), foreground="#5f6368")
+        self.issue_details.tag_configure("code", font=("Consolas", 9), foreground="#202124", background="#eef3fb")
 
     def _metric_card(self, parent, title: str, value_var: StringVar):
         frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
@@ -1181,8 +1182,6 @@ class ZipSecurityApp:
         suffix = " + " + ",".join(extras) if extras else ""
         mode_label = f"{config.local_provider}:{config.local_model}" + suffix
         self.status.set(f"Running local analysis via {mode_label}...")
-        self.output.delete("1.0", END)
-        self.human_output.delete("1.0", END)
         self.issue_details.delete("1.0", END)
         self.progress.set(0)
         self._clear_findings_table()
@@ -1195,20 +1194,23 @@ class ZipSecurityApp:
         try:
             total = max(1, len(self.selected_files))
             for idx, zip_path in enumerate(self.selected_files, start=1):
-                base = ((idx - 1) / total) * 100
-                self.result_queue.put(("progress", {"percent": base, "message": f"Summarizing {zip_path.name}..."}))
+                # Progress slice for this file: 0-15% summarize, 15-95% model, 95-100% finalize
+                slice_start = ((idx - 1) / total) * 95
+                slice_end = (idx / total) * 95
+                self.result_queue.put(("progress", {"percent": slice_start, "message": f"Summarizing {zip_path.name}..."}))
                 summary = summarize_zip(
                     zip_path,
                     config.max_files,
                     config.max_bytes_per_file,
                     config.max_total_chars,
                 )
-                self.result_queue.put(("progress", {"percent": min(99, base + 60 / total), "message": f"Running model analysis for {zip_path.name}..."}))
+                self.result_queue.put(("progress", {"percent": slice_start + (slice_end - slice_start) * 0.15, "message": f"Running model analysis for {zip_path.name}..."}))
                 result = analyze_with_local_llm(config, summary, zip_path)
                 outfile = OUTPUT_DIR / f"{zip_path.stem}.analysis.json"
                 outfile.write_text(json.dumps(result, indent=2), encoding="utf-8")
                 aggregate.append({"zip": str(zip_path), "output_json": str(outfile), "result": result})
-                self.result_queue.put(("progress", {"percent": (idx / total) * 100, "message": f"Completed {zip_path.name}"}))
+                self.result_queue.put(("progress", {"percent": slice_end, "message": f"Completed {zip_path.name}"}))
+            self.result_queue.put(("progress", {"percent": 100, "message": "Done."}))
             self.result_queue.put(("ok", aggregate))
         except Exception as ex:
             self.result_queue.put(("err", str(ex)))
@@ -1273,60 +1275,21 @@ class ZipSecurityApp:
         self.selected_issue = issue
         self.selected_issue_zip = issue_zip
 
-        title = issue.get("title", "")
-        text = (
-            f"{title}\n"
-            f"{'=' * max(18, len(str(title)))}\n"
-            f"Issue ID: {issue.get('id', '')}    Severity: {issue.get('severity', '')}\n"
-            f"Location: {issue.get('file', '')}:{issue.get('line_number', '')}\n\n"
-            f"Why this matters\n"
-            f"- {issue.get('why_this_is_a_problem', '')}\n\n"
-            f"Recommended fix\n"
-            f"- {issue.get('suggested_fix', '')}\n\n"
-            f"Offending code\n"
-            f"{issue.get('offending_code', '')}"
-        )
         self.issue_details.delete("1.0", END)
-        self.issue_details.insert(END, text)
+        title = issue.get("title", "")
+        self.issue_details.insert(END, title + "\n", "title")
+        self.issue_details.insert(END, f"{issue.get('id', '')}  ·  {issue.get('severity', '')}  ·  {issue.get('file', '')}:{issue.get('line_number', '')}\n\n", "meta")
+        self.issue_details.insert(END, "Why this matters\n", "section")
+        self.issue_details.insert(END, (issue.get("why_this_is_a_problem") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Recommended fix\n", "section")
+        self.issue_details.insert(END, (issue.get("suggested_fix") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Offending code\n", "section")
+        code = (issue.get("offending_code") or "—").strip()
+        self.issue_details.insert(END, code if code else "—", "code")
         if self.can_generate_fix(issue):
             self.fix_button.state(["!disabled"])
         else:
             self.fix_button.state(["disabled"])
-
-    def _render_human_readable(self, aggregate_results: list[dict]) -> str:
-        lines = ["Frontend Security Analysis Report", "=" * 36, ""]
-        total_files = sum(item["result"].get("files_analyzed", 0) for item in aggregate_results)
-        all_issues = []
-        for item in aggregate_results:
-            all_issues.extend(item["result"].get("issues", []))
-
-        severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
-        for issue in all_issues:
-            sev = issue.get("severity", "Medium")
-            if sev in severity_counts:
-                severity_counts[sev] += 1
-
-        first = aggregate_results[0]["result"] if aggregate_results else {}
-        lines.append(f"Overall grade: {first.get('overall_security_grade_percent', 0)}%")
-        lines.append(f"Certainty: {first.get('certainty_percent', 0)}%")
-        lines.append(f"Files analyzed: {total_files}")
-        lines.append(f"Issues found: {len(all_issues)}")
-        lines.append("Severity histogram: " + ", ".join(f"{k}={v}" for k, v in severity_counts.items()))
-        lines.append("")
-
-        for issue in all_issues[:120]:
-            lines.append(f"{issue.get('id')} | {issue.get('severity')} | {issue.get('title')}")
-            lines.append(f"Location: {issue.get('file')}:{issue.get('line_number')}")
-            lines.append("Why this matters:")
-            lines.append(f"  {issue.get('why_this_is_a_problem')}")
-            lines.append("Recommended fix:")
-            lines.append(f"  {issue.get('suggested_fix')}")
-            if issue.get("offending_code"):
-                lines.append("Offending code:")
-                lines.append(f"  {issue.get('offending_code')}")
-            lines.append("-" * 72)
-
-        return "\n".join(lines)
 
     def _poll_results(self):
         try:
@@ -1341,14 +1304,10 @@ class ZipSecurityApp:
                 self.status.set("Analysis complete.")
                 self.progress.set(100)
                 self._refresh_dashboard(payload)
-                self.output.insert(END, json.dumps(payload, indent=2))
-                self.human_output.insert(END, self._render_human_readable(payload))
                 learn_from_result_pack(payload)
             else:
                 self.status.set("Analysis failed.")
                 self.progress.set(0)
-                self.output.insert(END, payload)
-                self.human_output.insert(END, "Analysis failed before report generation.")
                 messagebox.showerror("Analysis failed", payload)
         except queue.Empty:
             pass
@@ -1470,13 +1429,13 @@ class ZipSecurityApp:
         ttk.Button(body, text="Save", style="Bubble.TButton", command=save_config).grid(row=len(fields) + 1, column=1, sticky="e", pady=10)
 
     def save_output(self):
-        content = self.output.get("1.0", END).strip()
-        if not content:
-            messagebox.showinfo("No output", "No JSON output is currently visible.")
+        if not self.results_cache:
+            messagebox.showinfo("No output", "Run an analysis first to export JSON.")
             return
         save_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if not save_path:
             return
+        content = json.dumps(self.results_cache, indent=2)
         Path(save_path).write_text(content, encoding="utf-8")
         messagebox.showinfo("Saved", f"Saved JSON to {save_path}")
 
