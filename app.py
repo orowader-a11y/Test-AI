@@ -13,7 +13,7 @@ import urllib.request
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import END, DoubleVar, StringVar, Toplevel, Tk, filedialog, messagebox, ttk
+from tkinter import BOTH, END, Canvas, DoubleVar, Frame, Label, StringVar, Toplevel, Tk, filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 CONFIG_FILE = "config.properties"
@@ -1114,17 +1114,26 @@ class ZipSecurityApp:
         self.file_list.pack(fill="both", expand=True, pady=(6, 0))
 
         ttk.Label(right, text="Findings", style="CardTitle.TLabel").pack(anchor="w")
-        cols = ("id", "severity", "file", "line", "title")
-        self.issues_tree = ttk.Treeview(right, columns=cols, show="headings", height=12)
-        for col, width in [("id", 90), ("severity", 90), ("file", 260), ("line", 70), ("title", 380)]:
-            self.issues_tree.heading(col, text=col.upper())
-            self.issues_tree.column(col, width=width, anchor="w")
-        self.issues_tree.tag_configure("critical", background="#b91c1c", foreground="white")
-        self.issues_tree.tag_configure("high", background="#dc2626", foreground="white")
-        self.issues_tree.tag_configure("medium", background="#ea580c", foreground="white")
-        self.issues_tree.tag_configure("low", background="#eab308", foreground="#1f2937")
-        self.issues_tree.pack(fill="x", pady=(6, 8))
-        self.issues_tree.bind("<<TreeviewSelect>>", self._on_issue_selected)
+        # Findings table: header + scrollable body with grid of labels (severity column colored only)
+        self._findings_col_widths = (90, 90, 260, 70, 380)
+        self._findings_header = ttk.Frame(right, style="Card.TFrame")
+        self._findings_header.pack(fill="x")
+        for c, (col_name, w) in enumerate(zip(("ID", "SEVERITY", "FILE", "LINE", "TITLE"), self._findings_col_widths)):
+            lbl = ttk.Label(self._findings_header, text=col_name, style="CardTitle.TLabel")
+            lbl.grid(row=0, column=c, sticky="w", padx=2, pady=(0, 2))
+            self._findings_header.columnconfigure(c, minsize=w)
+        self._findings_canvas = Canvas(right, bg="#ffffff", highlightthickness=0)
+        self._findings_scroll = ttk.Scrollbar(right)
+        self._findings_body = Frame(self._findings_canvas, bg="#ffffff")
+        self._findings_body_id = self._findings_canvas.create_window((0, 0), window=self._findings_body, anchor="nw")
+        self._findings_canvas.configure(yscrollcommand=self._findings_scroll.set)
+        self._findings_scroll.configure(command=self._findings_canvas.yview)
+        self._findings_canvas.pack(fill=BOTH, expand=True, pady=(0, 8))
+        self._findings_scroll.pack(side="right", fill="y", pady=(0, 8))
+        self._findings_row_frames: list[tuple[Frame, list[Label], str]] = []  # (row_frame, cell_labels, key)
+        self._findings_selected_row: int | None = None
+        self._findings_canvas.bind("<Configure>", self._on_findings_canvas_configure)
+        self._findings_body.bind("<Configure>", self._on_findings_body_configure)
 
         details_header = ttk.Frame(right, style="Card.TFrame")
         details_header.pack(fill="x")
@@ -1148,6 +1157,57 @@ class ZipSecurityApp:
         self.issue_details.tag_configure("body", font=("Segoe UI", 10), foreground="#202124")
         self.issue_details.tag_configure("meta", font=("Segoe UI", 9), foreground="#5f6368")
         self.issue_details.tag_configure("code", font=("Consolas", 9), foreground="#202124", background="#eef3fb")
+
+    def _on_findings_canvas_configure(self, event):
+        self._findings_canvas.itemconfigure(self._findings_body_id, width=event.width)
+
+    def _on_findings_body_configure(self, _event=None):
+        self._findings_canvas.configure(scrollregion=self._findings_canvas.bbox("all"))
+
+    def _severity_cell_colors(self, issue: dict) -> tuple[str, str]:
+        """Return (background, foreground) for severity column only."""
+        colors = {
+            "Critical": ("#b91c1c", "white"),
+            "High": ("#dc2626", "white"),
+            "Medium": ("#ea580c", "white"),
+            "Low": ("#eab308", "#1f2937"),
+        }
+        sev = str(issue.get("severity", "Medium")).title()
+        return colors.get(sev, ("#ea580c", "white"))
+
+    def _on_findings_row_click(self, key: str):
+        row_index = int(key.split("-")[1]) - 1
+        for i, (frame, labels, k) in enumerate(self._findings_row_frames):
+            if k == key:
+                for j, lbl in enumerate(labels):
+                    if j != 1:
+                        lbl.configure(bg="#e3f2fd")
+            else:
+                for j, lbl in enumerate(labels):
+                    if j != 1:
+                        lbl.configure(bg="#ffffff")
+        self._findings_selected_row = row_index
+        issue_info = self.issue_lookup.get(key)
+        if not issue_info:
+            return
+        issue, issue_zip = issue_info
+        self.selected_issue = issue
+        self.selected_issue_zip = issue_zip
+        self.issue_details.delete("1.0", END)
+        title = issue.get("title", "")
+        self.issue_details.insert(END, title + "\n", "title")
+        self.issue_details.insert(END, f"{issue.get('id', '')}  ·  {issue.get('severity', '')}  ·  {issue.get('file', '')}:{issue.get('line_number', '')}\n\n", "meta")
+        self.issue_details.insert(END, "Why this matters\n", "section")
+        self.issue_details.insert(END, (issue.get("why_this_is_a_problem") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Recommended fix\n", "section")
+        self.issue_details.insert(END, (issue.get("suggested_fix") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Offending code\n", "section")
+        code = (issue.get("offending_code") or "—").strip()
+        self.issue_details.insert(END, code if code else "—", "code")
+        if self.can_generate_fix(issue):
+            self.fix_button.state(["!disabled"])
+        else:
+            self.fix_button.state(["disabled"])
 
     def _metric_card(self, parent, title: str, value_var: StringVar):
         frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
@@ -1221,24 +1281,19 @@ class ZipSecurityApp:
 
     def _clear_findings_table(self):
         """Clear current issue rows/details before a new scan or refresh."""
-        for row in self.issues_tree.get_children():
-            self.issues_tree.delete(row)
+        for frame, _labels, _key in self._findings_row_frames:
+            frame.destroy()
+        self._findings_row_frames.clear()
         self.issue_details.delete("1.0", END)
         self.fix_button.state(["disabled"])
         self.selected_issue = None
         self.selected_issue_zip = ""
+        self._findings_selected_row = None
 
     def _severity_sort_key(self, issue: dict) -> int:
         """Order: Critical=0, High=1, Medium=2, Low=3 (most severe first)."""
         order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
         return order.get(str(issue.get("severity", "Medium")).title(), 2)
-
-    def _severity_tag(self, issue: dict) -> str:
-        """Tag name for Treeview row styling (critical, high, medium, low)."""
-        sev = str(issue.get("severity", "Medium")).title()
-        if sev not in ("Critical", "High", "Medium", "Low"):
-            return "medium"
-        return sev.lower()
 
     def _refresh_dashboard(self, aggregate_results: list[dict]):
         if not aggregate_results:
@@ -1264,53 +1319,41 @@ class ZipSecurityApp:
         self.issue_count.set(str(len(flat)))
 
         self._clear_findings_table()
+        cell_font = ("Segoe UI", 9)
         for row_index, (issue, zip_path) in enumerate(flat, start=1):
             key = f"issue-{row_index}"
-            tag = self._severity_tag(issue)
-            self.issues_tree.insert(
-                "",
-                END,
-                iid=key,
-                values=(
-                    issue.get("id", ""),
-                    issue.get("severity", ""),
-                    issue.get("file", ""),
-                    issue.get("line_number", ""),
-                    issue.get("title", ""),
-                ),
-                tags=(tag,),
+            row_frame = Frame(self._findings_body, bg="#ffffff", cursor="hand2")
+            row_frame.grid(row=row_index - 1, column=0, sticky="ew")
+            self._findings_body.columnconfigure(0, weight=1)
+            vals = (
+                issue.get("id", ""),
+                issue.get("severity", ""),
+                issue.get("file", ""),
+                str(issue.get("line_number", "")),
+                issue.get("title", ""),
             )
-
-    def _on_issue_selected(self, _event=None):
-        selected = self.issues_tree.selection()
-        if not selected:
-            return
-        iid = selected[0]
-        values = self.issues_tree.item(iid, "values")
-        if not values:
-            return
-        issue_info = self.issue_lookup.get(iid)
-        if not issue_info:
-            return
-        issue, issue_zip = issue_info
-        self.selected_issue = issue
-        self.selected_issue_zip = issue_zip
-
-        self.issue_details.delete("1.0", END)
-        title = issue.get("title", "")
-        self.issue_details.insert(END, title + "\n", "title")
-        self.issue_details.insert(END, f"{issue.get('id', '')}  ·  {issue.get('severity', '')}  ·  {issue.get('file', '')}:{issue.get('line_number', '')}\n\n", "meta")
-        self.issue_details.insert(END, "Why this matters\n", "section")
-        self.issue_details.insert(END, (issue.get("why_this_is_a_problem") or "—") + "\n\n", "body")
-        self.issue_details.insert(END, "Recommended fix\n", "section")
-        self.issue_details.insert(END, (issue.get("suggested_fix") or "—") + "\n\n", "body")
-        self.issue_details.insert(END, "Offending code\n", "section")
-        code = (issue.get("offending_code") or "—").strip()
-        self.issue_details.insert(END, code if code else "—", "code")
-        if self.can_generate_fix(issue):
-            self.fix_button.state(["!disabled"])
-        else:
-            self.fix_button.state(["disabled"])
+            sev_bg, sev_fg = self._severity_cell_colors(issue)
+            labels = []
+            for c, (w, val) in enumerate(zip(self._findings_col_widths, vals)):
+                bg = sev_bg if c == 1 else "#ffffff"
+                fg = sev_fg if c == 1 else "#202124"
+                lbl = Label(
+                    row_frame,
+                    text=val,
+                    anchor="w",
+                    bg=bg,
+                    fg=fg,
+                    font=cell_font,
+                    padx=4,
+                    pady=3,
+                )
+                lbl.grid(row=0, column=c, sticky="ew", padx=1, pady=1)
+                row_frame.columnconfigure(c, minsize=w)
+                labels.append(lbl)
+            row_frame.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+            for lbl in labels:
+                lbl.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+            self._findings_row_frames.append((row_frame, labels, key))
 
     def _poll_results(self):
         try:
