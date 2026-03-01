@@ -138,6 +138,9 @@ class AppConfig:
     claude_model: str
     claude_api_key_env: str
     claude_base_url: str
+    sonar_url: str
+    sonar_token_env: str
+    sonar_project_key: str
 
 
 def app_base_dir() -> Path:
@@ -173,6 +176,9 @@ def load_properties(path: str) -> AppConfig:
         claude_model=values.get("claude.model", "claude-3-5-sonnet-20241022"),
         claude_api_key_env=values.get("claude.apiKeyEnv", "ANTHROPIC_API_KEY"),
         claude_base_url=values.get("claude.baseUrl", "https://api.anthropic.com/v1/messages"),
+        sonar_url=values.get("sonar.url", "").strip(),
+        sonar_token_env=values.get("sonar.tokenEnv", "SONAR_TOKEN"),
+        sonar_project_key=values.get("sonar.projectKey", "").strip(),
     )
 
 
@@ -617,13 +623,92 @@ def _run_regex_tool(tool_name: str, payload: dict, patterns: list[tuple[re.Patte
     return issues
 
 
-def run_internal_library_analyses(payload: dict) -> tuple[list[dict], list[str]]:
+def _sonarqube_severity_to_ours(severity: str) -> str:
+    """Map SonarQube severity to our Critical/High/Medium/Low."""
+    s = (severity or "").upper()
+    if s in ("BLOCKER", "CRITICAL"):
+        return "Critical"
+    if s == "MAJOR":
+        return "High"
+    if s == "MINOR":
+        return "Medium"
+    return "Low"
+
+
+def _fetch_sonarqube_api_issues(config: AppConfig) -> list[dict]:
+    """
+    Fetch issues from SonarQube server using python-sonarqube-api.
+    Returns list of issues in our format; empty list if disabled, misconfigured, or on error.
+    """
+    if not config.sonar_url or not config.sonar_project_key:
+        return []
+    token = os.environ.get(config.sonar_token_env, "").strip()
+    if not token:
+        return []
+    try:
+        from sonarqube import SonarQubeClient
+    except ImportError:
+        return []
+    issues_out = []
+    try:
+        client = SonarQubeClient(sonarqube_url=config.sonar_url, token=token)
+        page = 1
+        page_size = 100
+        while True:
+            resp = client.issues.search_issues(
+                componentKeys=config.sonar_project_key,
+                p=page,
+                ps=page_size,
+            )
+            items = resp.get("issues", []) if isinstance(resp, dict) else []
+            if not items:
+                break
+            for raw in items:
+                comp = raw.get("component") or raw.get("componentKey") or ""
+                if ":" in comp:
+                    file_path = comp.split(":", 1)[-1]
+                else:
+                    file_path = comp or "unknown"
+                line = int(raw.get("line") or 0) or 1
+                message = str(raw.get("message") or "Security or quality issue")
+                severity = _sonarqube_severity_to_ours(str(raw.get("severity") or "MAJOR"))
+                rule = str(raw.get("rule") or "")
+                issues_out.append(
+                    _make_issue(
+                        file_path,
+                        line,
+                        len(issues_out) + 1,
+                        f"[sonarqube-api] {message[:120]}",
+                        severity,
+                        "",
+                        message,
+                        f"Address finding from rule {rule}. Review in SonarQube for details." if rule else "Review in SonarQube for remediation.",
+                    )
+                )
+                if len(issues_out) >= 200:
+                    return issues_out
+            if len(items) < page_size:
+                break
+            page += 1
+    except Exception:
+        pass
+    return issues_out
+
+
+def run_internal_library_analyses(payload: dict, config: AppConfig | None = None) -> tuple[list[dict], list[str]]:
     tool_issues: list[dict] = []
     tools_used: list[str] = []
 
+    # Optional: fetch issues from SonarQube server via python-sonarqube-api (when configured)
+    if config and config.sonar_url and config.sonar_project_key:
+        api_issues = _fetch_sonarqube_api_issues(config)
+        if api_issues:
+            tool_issues.extend(api_issues)
+            tools_used.append("sonarqube-api")
+
     tool_specs = []
-    sonarqube_available = bool(importlib.util.find_spec("sonarqube")) or bool(shutil.which("sonar-scanner"))
-    if sonarqube_available:
+    sonarqube_regex_available = bool(importlib.util.find_spec("sonarqube")) or bool(shutil.which("sonar-scanner"))
+    if sonarqube_regex_available:
         sonarqube_patterns = [
             (re.compile(r"dangerouslySetInnerHTML", re.IGNORECASE), "Unsanitized HTML rendering sink", "High", "Sonar-style sink detection flagged raw HTML rendering path.", "Use safe DOM APIs or sanitize trusted HTML with an allowlist sanitizer."),
             (re.compile(r"window\.postMessage\([^\n]{0,200},\s*(?:\"|\')\*(?:\"|\')", re.IGNORECASE), "Wildcard postMessage target", "High", "Wildcard target origin may leak sensitive payloads to untrusted windows.", "Set explicit targetOrigin and validate event.origin on receiver side."),
@@ -996,7 +1081,7 @@ def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None 
     claude_issues = annotate_source_issues(claude_result.get("issues", []), "claude") if claude_result else []
 
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
-    tool_issues, tools_used = run_internal_library_analyses(payload)
+    tool_issues, tools_used = run_internal_library_analyses(payload, config)
 
     cross_llm_issues = dedupe_issues(chatgpt_issues + claude_issues)
     merged_model_issues = dedupe_issues(model_result.get("issues", []) + cross_llm_issues)
@@ -1540,6 +1625,9 @@ class ZipSecurityApp:
             ("claude.model", config.claude_model),
             ("claude.apiKeyEnv", config.claude_api_key_env),
             ("claude.baseUrl", config.claude_base_url),
+            ("sonar.url", config.sonar_url),
+            ("sonar.tokenEnv", config.sonar_token_env),
+            ("sonar.projectKey", config.sonar_project_key),
         ]
         vars_map: dict[str, StringVar] = {}
         body = ttk.Frame(win, padding=12)
