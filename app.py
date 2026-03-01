@@ -38,6 +38,193 @@ STRICT_OUTPUT_EXAMPLE = {
     ],
 }
 
+# Comprehensive security checklist: evaluate code against these (LLM, payload, and internal context).
+# Used to extend required_checks in the ZIP payload and the analysis prompt sent to Ollama/ChatGPT/Claude.
+SECURITY_CHECKLIST = {
+    "transport_security": {
+        "https_enforced": True,
+        "http_redirects_to_https": True,
+        "tls_version_1_2_or_higher": True,
+        "valid_tls_certificate": True,
+        "no_mixed_content": True,
+        "hsts_enabled": True,
+        "hsts_include_subdomains": True,
+        "hsts_preload_considered": True,
+    },
+    "content_security_policy": {
+        "csp_header_present": True,
+        "default_src_self": True,
+        "no_unsafe_inline": True,
+        "no_unsafe_eval": True,
+        "script_src_nonce_or_hash": True,
+        "object_src_none": True,
+        "base_uri_self": True,
+        "frame_ancestors_defined": True,
+        "upgrade_insecure_requests": True,
+    },
+    "xss_prevention": {
+        "output_encoding_html": True,
+        "output_encoding_attributes": True,
+        "output_encoding_js_context": True,
+        "output_encoding_url_context": True,
+        "avoid_innerHTML": True,
+        "sanitize_user_generated_html": True,
+        "no_inline_event_handlers": True,
+        "no_eval_usage": True,
+    },
+    "cookie_security": {
+        "httponly_flag": True,
+        "secure_flag": True,
+        "samesite_configured": True,
+        "no_sensitive_data_in_cookies": True,
+    },
+    "authentication_tokens": {
+        "no_tokens_in_localstorage": True,
+        "csrf_protection_present": True,
+        "logout_clears_tokens": True,
+        "token_expiration_enforced": True,
+    },
+    "security_headers": {
+        "content_security_policy": True,
+        "strict_transport_security": True,
+        "x_content_type_options_nosniff": True,
+        "x_frame_options": True,
+        "referrer_policy": True,
+        "permissions_policy": True,
+        "server_header_hidden": True,
+        "x_powered_by_removed": True,
+    },
+    "dependency_security": {
+        "dependencies_audited": True,
+        "no_unused_dependencies": True,
+        "lockfile_committed": True,
+        "exact_versions_used": True,
+        "subresource_integrity_for_cdn": True,
+    },
+    "cors_configuration": {
+        "no_wildcard_origin_for_auth": True,
+        "restricted_methods": True,
+        "restricted_headers": True,
+        "no_credentials_with_wildcard": True,
+    },
+    "file_upload_security": {
+        "file_type_restricted": True,
+        "mime_type_validated": True,
+        "file_size_limited": True,
+        "server_side_validation_required": True,
+    },
+    "javascript_security": {
+        "no_eval": True,
+        "no_new_function": True,
+        "no_dynamic_script_injection": True,
+        "no_global_namespace_pollution": True,
+        "use_strict_or_es_modules": True,
+    },
+    "debug_artifacts": {
+        "no_console_logs_in_production": True,
+        "no_exposed_api_keys": True,
+        "no_hardcoded_secrets": True,
+        "source_maps_protected_or_removed": True,
+        "no_test_endpoints_exposed": True,
+    },
+    "storage_security": {
+        "no_sensitive_data_in_localstorage": True,
+        "no_sensitive_data_in_sessionstorage": True,
+        "no_sensitive_data_in_indexeddb": True,
+        "clear_storage_on_logout": True,
+    },
+    "clickjacking_protection": {
+        "x_frame_options_set": True,
+        "csp_frame_ancestors_set": True,
+        "no_sensitive_iframe_usage": True,
+    },
+    "dom_injection_risks": {
+        "dom_xss_checked": True,
+        "template_injection_checked": True,
+        "url_parameter_validation": True,
+        "open_redirect_prevention": True,
+        "regex_dos_checked": True,
+    },
+    "api_exposure": {
+        "no_internal_endpoints_exposed": True,
+        "no_admin_routes_public": True,
+        "no_debug_json_exposed": True,
+        "no_verbose_error_messages": True,
+    },
+    "service_worker_security": {
+        "secure_service_worker": True,
+        "no_caching_auth_responses": True,
+        "no_caching_sensitive_data": True,
+        "old_service_workers_cleared": True,
+    },
+    "build_deployment_security": {
+        "production_build_minified": True,
+        "env_variables_separated": True,
+        "ci_security_checks_enabled": True,
+        "no_dev_configs_in_prod": True,
+    },
+    "privacy_data_leakage": {
+        "no_pii_in_frontend_code": True,
+        "mask_sensitive_fields": True,
+        "no_sensitive_info_in_urls": True,
+        "referrer_policy_configured": True,
+    },
+    "rate_limiting_alignment": {
+        "ui_prevents_bruteforce_patterns": True,
+        "captcha_when_appropriate": True,
+        "account_lockout_mechanism": True,
+    },
+    "third_party_scripts": {
+        "scripts_audited": True,
+        "unused_trackers_removed": True,
+        "restricted_via_csp": True,
+        "third_party_monitoring_enabled": True,
+    },
+    "routing_security": {
+        "admin_routes_protected": True,
+        "no_security_by_obscurity": True,
+        "route_parameters_validated": True,
+        "no_open_redirect_routes": True,
+    },
+    "form_security": {
+        "csrf_tokens_present": True,
+        "client_and_server_validation": True,
+        "input_sanitized_before_render": True,
+    },
+    "monitoring_detection": {
+        "csp_reporting_enabled": True,
+        "error_monitoring_enabled": True,
+        "anomalous_js_execution_monitored": True,
+    },
+    "final_security_audit": {
+        "lighthouse_security_checked": True,
+        "owasp_zap_scan_completed": True,
+        "burp_suite_scan_completed": True,
+        "manual_xss_tested": True,
+        "manual_csrf_tested": True,
+        "manual_clickjacking_tested": True,
+        "manual_open_redirect_tested": True,
+        "manual_token_leakage_tested": True,
+    },
+}
+
+
+def _snake_to_label(snake: str) -> str:
+    """Convert snake_case to Title Case label."""
+    return " ".join(w.capitalize() for w in snake.split("_"))
+
+
+def _security_checklist_flat_checks() -> list[str]:
+    """Flatten SECURITY_CHECKLIST into a list of 'Category: Check' strings for payload and prompt."""
+    out = []
+    for category, checks in SECURITY_CHECKLIST.items():
+        cat_label = _snake_to_label(category)
+        for check_key in checks:
+            check_label = _snake_to_label(check_key)
+            out.append(f"{cat_label}: {check_label}")
+    return out
+
+
 SYSTEM_PROMPT = (
     "You are a senior frontend security auditor. "
     "You must return strict JSON only, no markdown, no prose. "
@@ -284,28 +471,30 @@ def summarize_zip(zip_path: Path, max_files: int, max_bytes_per_file: int, max_t
 
             file_summaries.append(entry)
 
+    required_checks = [
+        "Exposed secrets / tokens",
+        "API endpoint leaks",
+        "Unsafe auth flows",
+        "XSS sinks & injection vectors",
+        "postMessage misuse",
+        "CSP weaknesses",
+        "Dangerous dependencies (heuristic if lockfile present)",
+        "Insecure storage patterns",
+        "Debug leftovers",
+        "Build misconfigurations",
+        "Public environment variable leaks",
+        "Open redirects",
+        "Prototype pollution vectors",
+        "SSRF-enabling frontend patterns",
+        "AI-generated insecure code patterns",
+    ]
+    required_checks.extend(_security_checklist_flat_checks())
     return {
         "zip_name": zip_path.name,
         "files_analyzed": len(file_summaries),
         "files": file_summaries,
         "cross_file_analysis_required": True,
-        "required_checks": [
-            "Exposed secrets / tokens",
-            "API endpoint leaks",
-            "Unsafe auth flows",
-            "XSS sinks & injection vectors",
-            "postMessage misuse",
-            "CSP weaknesses",
-            "Dangerous dependencies (heuristic if lockfile present)",
-            "Insecure storage patterns",
-            "Debug leftovers",
-            "Build misconfigurations",
-            "Public environment variable leaks",
-            "Open redirects",
-            "Prototype pollution vectors",
-            "SSRF-enabling frontend patterns",
-            "AI-generated insecure code patterns",
-        ],
+        "required_checks": required_checks,
     }
 
 
@@ -904,6 +1093,7 @@ def merge_and_score_results(
 
 
 def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
+    checklist_lines = "\n".join(f"- {c}" for c in _security_checklist_flat_checks())
     return (
         "Analyze this uploaded frontend ZIP summary as a static security review. "
         "Apply cross-file reasoning. Return STRICT JSON exactly in this shape:\n"
@@ -917,6 +1107,9 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
         "5) No markdown, no comments, JSON only.\n"
         "6) Output must start with { and end with }.\n\n"
         "7) Prefer precision over quantity; skip low-confidence items without evidence snippet/location.\n\n"
+        "8) Evaluate the code against the following security checklist. Report issues where the code violates or fails to satisfy a check "
+        "(infer from static context where possible; for server/runtime-only checks note if missing or unclear):\n"
+        f"{checklist_lines}\n\n"
         f"ZIP_SUMMARY:\n{json.dumps(payload)}\n\n"
         f"{learning_context}"
     )
