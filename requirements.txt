@@ -1,1 +1,2 @@
 pyinstaller==6.11.1
+python-sonarqube-api>=2.0.0

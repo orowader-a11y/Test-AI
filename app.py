@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 import queue
 import re
@@ -7,10 +8,13 @@ import subprocess
 import sys
 import threading
 import zipfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import END, StringVar, Text, Tk, filedialog, messagebox, ttk
+from tkinter import BOTH, END, Canvas, DoubleVar, Frame, Label, StringVar, Toplevel, Tk, filedialog, messagebox, ttk
+from tkinter.scrolledtext import ScrolledText
 
 CONFIG_FILE = "config.properties"
 OUTPUT_DIR = Path("output")
@@ -33,6 +37,193 @@ STRICT_OUTPUT_EXAMPLE = {
         }
     ],
 }
+
+# Comprehensive security checklist: evaluate code against these (LLM, payload, and internal context).
+# Used to extend required_checks in the ZIP payload and the analysis prompt sent to Ollama/ChatGPT/Claude.
+SECURITY_CHECKLIST = {
+    "transport_security": {
+        "https_enforced": True,
+        "http_redirects_to_https": True,
+        "tls_version_1_2_or_higher": True,
+        "valid_tls_certificate": True,
+        "no_mixed_content": True,
+        "hsts_enabled": True,
+        "hsts_include_subdomains": True,
+        "hsts_preload_considered": True,
+    },
+    "content_security_policy": {
+        "csp_header_present": True,
+        "default_src_self": True,
+        "no_unsafe_inline": True,
+        "no_unsafe_eval": True,
+        "script_src_nonce_or_hash": True,
+        "object_src_none": True,
+        "base_uri_self": True,
+        "frame_ancestors_defined": True,
+        "upgrade_insecure_requests": True,
+    },
+    "xss_prevention": {
+        "output_encoding_html": True,
+        "output_encoding_attributes": True,
+        "output_encoding_js_context": True,
+        "output_encoding_url_context": True,
+        "avoid_innerHTML": True,
+        "sanitize_user_generated_html": True,
+        "no_inline_event_handlers": True,
+        "no_eval_usage": True,
+    },
+    "cookie_security": {
+        "httponly_flag": True,
+        "secure_flag": True,
+        "samesite_configured": True,
+        "no_sensitive_data_in_cookies": True,
+    },
+    "authentication_tokens": {
+        "no_tokens_in_localstorage": True,
+        "csrf_protection_present": True,
+        "logout_clears_tokens": True,
+        "token_expiration_enforced": True,
+    },
+    "security_headers": {
+        "content_security_policy": True,
+        "strict_transport_security": True,
+        "x_content_type_options_nosniff": True,
+        "x_frame_options": True,
+        "referrer_policy": True,
+        "permissions_policy": True,
+        "server_header_hidden": True,
+        "x_powered_by_removed": True,
+    },
+    "dependency_security": {
+        "dependencies_audited": True,
+        "no_unused_dependencies": True,
+        "lockfile_committed": True,
+        "exact_versions_used": True,
+        "subresource_integrity_for_cdn": True,
+    },
+    "cors_configuration": {
+        "no_wildcard_origin_for_auth": True,
+        "restricted_methods": True,
+        "restricted_headers": True,
+        "no_credentials_with_wildcard": True,
+    },
+    "file_upload_security": {
+        "file_type_restricted": True,
+        "mime_type_validated": True,
+        "file_size_limited": True,
+        "server_side_validation_required": True,
+    },
+    "javascript_security": {
+        "no_eval": True,
+        "no_new_function": True,
+        "no_dynamic_script_injection": True,
+        "no_global_namespace_pollution": True,
+        "use_strict_or_es_modules": True,
+    },
+    "debug_artifacts": {
+        "no_console_logs_in_production": True,
+        "no_exposed_api_keys": True,
+        "no_hardcoded_secrets": True,
+        "source_maps_protected_or_removed": True,
+        "no_test_endpoints_exposed": True,
+    },
+    "storage_security": {
+        "no_sensitive_data_in_localstorage": True,
+        "no_sensitive_data_in_sessionstorage": True,
+        "no_sensitive_data_in_indexeddb": True,
+        "clear_storage_on_logout": True,
+    },
+    "clickjacking_protection": {
+        "x_frame_options_set": True,
+        "csp_frame_ancestors_set": True,
+        "no_sensitive_iframe_usage": True,
+    },
+    "dom_injection_risks": {
+        "dom_xss_checked": True,
+        "template_injection_checked": True,
+        "url_parameter_validation": True,
+        "open_redirect_prevention": True,
+        "regex_dos_checked": True,
+    },
+    "api_exposure": {
+        "no_internal_endpoints_exposed": True,
+        "no_admin_routes_public": True,
+        "no_debug_json_exposed": True,
+        "no_verbose_error_messages": True,
+    },
+    "service_worker_security": {
+        "secure_service_worker": True,
+        "no_caching_auth_responses": True,
+        "no_caching_sensitive_data": True,
+        "old_service_workers_cleared": True,
+    },
+    "build_deployment_security": {
+        "production_build_minified": True,
+        "env_variables_separated": True,
+        "ci_security_checks_enabled": True,
+        "no_dev_configs_in_prod": True,
+    },
+    "privacy_data_leakage": {
+        "no_pii_in_frontend_code": True,
+        "mask_sensitive_fields": True,
+        "no_sensitive_info_in_urls": True,
+        "referrer_policy_configured": True,
+    },
+    "rate_limiting_alignment": {
+        "ui_prevents_bruteforce_patterns": True,
+        "captcha_when_appropriate": True,
+        "account_lockout_mechanism": True,
+    },
+    "third_party_scripts": {
+        "scripts_audited": True,
+        "unused_trackers_removed": True,
+        "restricted_via_csp": True,
+        "third_party_monitoring_enabled": True,
+    },
+    "routing_security": {
+        "admin_routes_protected": True,
+        "no_security_by_obscurity": True,
+        "route_parameters_validated": True,
+        "no_open_redirect_routes": True,
+    },
+    "form_security": {
+        "csrf_tokens_present": True,
+        "client_and_server_validation": True,
+        "input_sanitized_before_render": True,
+    },
+    "monitoring_detection": {
+        "csp_reporting_enabled": True,
+        "error_monitoring_enabled": True,
+        "anomalous_js_execution_monitored": True,
+    },
+    "final_security_audit": {
+        "lighthouse_security_checked": True,
+        "owasp_zap_scan_completed": True,
+        "burp_suite_scan_completed": True,
+        "manual_xss_tested": True,
+        "manual_csrf_tested": True,
+        "manual_clickjacking_tested": True,
+        "manual_open_redirect_tested": True,
+        "manual_token_leakage_tested": True,
+    },
+}
+
+
+def _snake_to_label(snake: str) -> str:
+    """Convert snake_case to Title Case label."""
+    return " ".join(w.capitalize() for w in snake.split("_"))
+
+
+def _security_checklist_flat_checks() -> list[str]:
+    """Flatten SECURITY_CHECKLIST into a list of 'Category: Check' strings for payload and prompt."""
+    out = []
+    for category, checks in SECURITY_CHECKLIST.items():
+        cat_label = _snake_to_label(category)
+        for check_key in checks:
+            check_label = _snake_to_label(check_key)
+            out.append(f"{cat_label}: {check_label}")
+    return out
+
 
 SYSTEM_PROMPT = (
     "You are a senior frontend security auditor. "
@@ -90,10 +281,35 @@ BOOTSTRAP_FEWSHOT_EXAMPLES = [
         "risk": "Session token written via JS cookie",
         "fix": "Set session cookies from server with HttpOnly + Secure + SameSite.",
     },
+    {
+        "file": "src/router/redirect.ts",
+        "code": "router.push(query.next);",
+        "risk": "Unvalidated redirect target",
+        "fix": "Restrict redirects to same-origin/allowlisted routes.",
+    },
+    {
+        "file": "src/sanitize/unsafe.tsx",
+        "code": "element.outerHTML = userGeneratedHtml;",
+        "risk": "Unsafe HTML sink (outerHTML)",
+        "fix": "Avoid HTML sinks or sanitize with strict allowlist sanitizer.",
+    },
+    {
+        "file": "src/transport/ws.js",
+        "code": "socket.send(JSON.stringify({ token }));",
+        "risk": "Potential token exposure over client channel",
+        "fix": "Avoid sending raw session tokens in client message payloads.",
+    },
+    {
+        "file": "src/bootstrap/init.js",
+        "code": "window.addEventListener('message', (e) => handle(e.data));",
+        "risk": "postMessage receiver missing origin validation",
+        "fix": "Verify `e.origin` against trusted origins before handling messages.",
+    },
 ]
 
 @dataclass
 class AppConfig:
+    # Local runtime configuration.
     local_provider: str
     local_model: str
     ollama_command: str
@@ -103,6 +319,15 @@ class AppConfig:
     max_bytes_per_file: int
     max_total_chars: int
     learning_examples: int
+    openai_model: str
+    openai_api_key_env: str
+    openai_base_url: str
+    claude_model: str
+    claude_api_key_env: str
+    claude_base_url: str
+    sonar_url: str
+    sonar_token_env: str
+    sonar_project_key: str
 
 
 def app_base_dir() -> Path:
@@ -112,6 +337,7 @@ def app_base_dir() -> Path:
 
 
 def load_properties(path: str) -> AppConfig:
+    """Load app settings from config.properties into a typed configuration object."""
     values = {}
     with open(path, "r", encoding="utf-8") as file:
         for line in file:
@@ -130,7 +356,16 @@ def load_properties(path: str) -> AppConfig:
         max_files=int(values.get("analysis.maxFiles", "300")),
         max_bytes_per_file=int(values.get("analysis.maxBytesPerFile", "9000")),
         max_total_chars=int(values.get("analysis.maxTotalChars", "180000")),
-        learning_examples=int(values.get("learning.maxExamples", "6")),
+        learning_examples=int(values.get("learning.maxExamples", "12")),
+        openai_model=values.get("openai.model", "gpt-4o-mini"),
+        openai_api_key_env=values.get("openai.apiKeyEnv", "OPENAI_API_KEY"),
+        openai_base_url=values.get("openai.baseUrl", "https://api.openai.com/v1/chat/completions"),
+        claude_model=values.get("claude.model", "claude-3-5-sonnet-20241022"),
+        claude_api_key_env=values.get("claude.apiKeyEnv", "ANTHROPIC_API_KEY"),
+        claude_base_url=values.get("claude.baseUrl", "https://api.anthropic.com/v1/messages"),
+        sonar_url=values.get("sonar.url", "").strip(),
+        sonar_token_env=values.get("sonar.tokenEnv", "SONAR_TOKEN"),
+        sonar_project_key=values.get("sonar.projectKey", "").strip(),
     )
 
 
@@ -236,28 +471,30 @@ def summarize_zip(zip_path: Path, max_files: int, max_bytes_per_file: int, max_t
 
             file_summaries.append(entry)
 
+    required_checks = [
+        "Exposed secrets / tokens",
+        "API endpoint leaks",
+        "Unsafe auth flows",
+        "XSS sinks & injection vectors",
+        "postMessage misuse",
+        "CSP weaknesses",
+        "Dangerous dependencies (heuristic if lockfile present)",
+        "Insecure storage patterns",
+        "Debug leftovers",
+        "Build misconfigurations",
+        "Public environment variable leaks",
+        "Open redirects",
+        "Prototype pollution vectors",
+        "SSRF-enabling frontend patterns",
+        "AI-generated insecure code patterns",
+    ]
+    required_checks.extend(_security_checklist_flat_checks())
     return {
         "zip_name": zip_path.name,
         "files_analyzed": len(file_summaries),
         "files": file_summaries,
         "cross_file_analysis_required": True,
-        "required_checks": [
-            "Exposed secrets / tokens",
-            "API endpoint leaks",
-            "Unsafe auth flows",
-            "XSS sinks & injection vectors",
-            "postMessage misuse",
-            "CSP weaknesses",
-            "Dangerous dependencies (heuristic if lockfile present)",
-            "Insecure storage patterns",
-            "Debug leftovers",
-            "Build misconfigurations",
-            "Public environment variable leaks",
-            "Open redirects",
-            "Prototype pollution vectors",
-            "SSRF-enabling frontend patterns",
-            "AI-generated insecure code patterns",
-        ],
+        "required_checks": required_checks,
     }
 
 
@@ -457,6 +694,36 @@ def ensure_output_shape(result: dict, fallback_summary: dict) -> dict:
     return out
 
 
+def resolve_issue_locations(result: dict, payload: dict) -> dict:
+    file_content = {str(item.get("path", "")): str(item.get("content", "")) for item in payload.get("files", [])}
+    candidates = list(file_content.items())
+
+    resolved = []
+    for issue in result.get("issues", []):
+        cloned = dict(issue)
+        file_name = str(cloned.get("file", "unknown")).strip()
+        code = str(cloned.get("offending_code", "")).strip()
+        why = str(cloned.get("why_this_is_a_problem", "")).strip()
+
+        if (not file_name or file_name.lower() == "unknown") and code:
+            match_path = ""
+            for path, content in candidates:
+                if code and code in content:
+                    match_path = path
+                    break
+            if match_path:
+                cloned["file"] = match_path
+                cloned["line_number"] = guess_line_number(file_content.get(match_path, ""), code)
+
+        if cloned.get("file", "unknown").lower() == "unknown" and not code and not why:
+            continue
+
+        resolved.append(cloned)
+
+    result["issues"] = resolved
+    return result
+
+
 def _make_issue(file_path: str, line_number: int, idx: int, title: str, severity: str, code: str, why: str, fix: str) -> dict:
     return {
         "file": file_path,
@@ -470,7 +737,239 @@ def _make_issue(file_path: str, line_number: int, idx: int, title: str, severity
     }
 
 
+def _tool_issue_key(issue: dict) -> tuple[str, int, str]:
+    return (
+        str(issue.get("file", "unknown")),
+        max(1, int(issue.get("line_number", 1) or 1)),
+        str(issue.get("title", "")).strip().lower(),
+    )
+
+
+def _normalize_issue_title(title: str) -> str:
+    clean = (title or "").strip()
+    clean = re.sub(r"^\[[^\]]+\]\s*", "", clean)
+    clean = re.sub(r"^learned pattern match:\s*", "", clean, flags=re.IGNORECASE)
+    return clean.strip()
+
+
+def _issue_dedupe_key(issue: dict) -> tuple[str, int, str, str]:
+    code = re.sub(r"\s+", " ", str(issue.get("offending_code", "")).strip().lower())
+    return (
+        str(issue.get("file", "unknown")).strip().lower(),
+        max(1, int(issue.get("line_number", 1) or 1)),
+        _normalize_issue_title(str(issue.get("title", "")).lower()),
+        code[:140],
+    )
+
+
+def dedupe_issues(issues: list[dict]) -> list[dict]:
+    deduped = []
+    seen = set()
+    for issue in issues:
+        key = _issue_dedupe_key(issue)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+    return deduped
+
+
+def annotate_source_issues(issues: list[dict], source_tag: str) -> list[dict]:
+    tagged = []
+    for issue in issues:
+        cloned = dict(issue)
+        if source_tag in {"chatgpt", "claude"}:
+            cloned["title"] = f"[{source_tag}] {cloned.get('title', 'Potential security issue')}"
+        tagged.append(cloned)
+    return tagged
+
+
+def _run_regex_tool(tool_name: str, payload: dict, patterns: list[tuple[re.Pattern, str, str, str, str]]) -> list[dict]:
+    issues = []
+    for item in payload.get("files", []):
+        file_path = str(item.get("path", "unknown"))
+        content = item.get("content") or ""
+        if not content:
+            continue
+        for regex, title, severity, why, fix in patterns:
+            for match in regex.finditer(content):
+                line = content.count("\n", 0, match.start()) + 1
+                code_line = content[match.start() : match.start() + 180].splitlines()[0].strip()
+                issues.append(
+                    _make_issue(
+                        file_path,
+                        line,
+                        len(issues) + 1,
+                        f"[{tool_name}] {title}",
+                        severity,
+                        code_line,
+                        why,
+                        fix,
+                    )
+                )
+                if len(issues) >= 80:
+                    return issues
+    return issues
+
+
+def _sonarqube_severity_to_ours(severity: str) -> str:
+    """Map SonarQube severity to our Critical/High/Medium/Low."""
+    s = (severity or "").upper()
+    if s in ("BLOCKER", "CRITICAL"):
+        return "Critical"
+    if s == "MAJOR":
+        return "High"
+    if s == "MINOR":
+        return "Medium"
+    return "Low"
+
+
+def _fetch_sonarqube_api_issues(config: AppConfig) -> list[dict]:
+    """
+    Fetch issues from SonarQube server using python-sonarqube-api.
+    Returns list of issues in our format; empty list if disabled, misconfigured, or on error.
+    """
+    if not config.sonar_url or not config.sonar_project_key:
+        return []
+    token = os.environ.get(config.sonar_token_env, "").strip()
+    if not token:
+        return []
+    try:
+        from sonarqube import SonarQubeClient
+    except ImportError:
+        return []
+    issues_out = []
+    try:
+        client = SonarQubeClient(sonarqube_url=config.sonar_url, token=token)
+        page = 1
+        page_size = 100
+        while True:
+            resp = client.issues.search_issues(
+                componentKeys=config.sonar_project_key,
+                p=page,
+                ps=page_size,
+            )
+            items = resp.get("issues", []) if isinstance(resp, dict) else []
+            if not items:
+                break
+            for raw in items:
+                comp = raw.get("component") or raw.get("componentKey") or ""
+                if ":" in comp:
+                    file_path = comp.split(":", 1)[-1]
+                else:
+                    file_path = comp or "unknown"
+                line = int(raw.get("line") or 0) or 1
+                message = str(raw.get("message") or "Security or quality issue")
+                severity = _sonarqube_severity_to_ours(str(raw.get("severity") or "MAJOR"))
+                rule = str(raw.get("rule") or "")
+                issues_out.append(
+                    _make_issue(
+                        file_path,
+                        line,
+                        len(issues_out) + 1,
+                        f"[sonarqube-api] {message[:120]}",
+                        severity,
+                        "",
+                        message,
+                        f"Address finding from rule {rule}. Review in SonarQube for details." if rule else "Review in SonarQube for remediation.",
+                    )
+                )
+                if len(issues_out) >= 200:
+                    return issues_out
+            if len(items) < page_size:
+                break
+            page += 1
+    except Exception:
+        pass
+    return issues_out
+
+
+def run_internal_library_analyses(payload: dict, config: AppConfig | None = None) -> tuple[list[dict], list[str]]:
+    tool_issues: list[dict] = []
+    tools_used: list[str] = []
+
+    # Optional: fetch issues from SonarQube server via python-sonarqube-api (when configured)
+    if config and config.sonar_url and config.sonar_project_key:
+        api_issues = _fetch_sonarqube_api_issues(config)
+        if api_issues:
+            tool_issues.extend(api_issues)
+            tools_used.append("sonarqube-api")
+
+    tool_specs = []
+    sonarqube_regex_available = bool(importlib.util.find_spec("sonarqube")) or bool(shutil.which("sonar-scanner"))
+    if sonarqube_regex_available:
+        sonarqube_patterns = [
+            (re.compile(r"dangerouslySetInnerHTML", re.IGNORECASE), "Unsanitized HTML rendering sink", "High", "Sonar-style sink detection flagged raw HTML rendering path.", "Use safe DOM APIs or sanitize trusted HTML with an allowlist sanitizer."),
+            (re.compile(r"window\.postMessage\([^\n]{0,200},\s*(?:\"|\')\*(?:\"|\')", re.IGNORECASE), "Wildcard postMessage target", "High", "Wildcard target origin may leak sensitive payloads to untrusted windows.", "Set explicit targetOrigin and validate event.origin on receiver side."),
+            (re.compile(r"(?:location\.(?:href|assign|replace)\s*=|window\.open\()", re.IGNORECASE), "Potential open redirect", "Medium", "Navigation sinks should validate attacker-controlled URLs.", "Restrict redirects to same-origin or allowlisted destinations."),
+        ]
+        tool_specs.append(("sonarqube", sonarqube_patterns))
+
+    dependency_patterns = [
+        (re.compile(r'"(lodash|minimist|jquery|moment)"\s*:\s*"(?:\^|~)?[0-3]?\.?[0-9]*', re.IGNORECASE), "Potentially outdated frontend dependency", "Medium", "Outdated dependency signatures can indicate known vulnerable versions.", "Pin and upgrade dependency versions, then review CVEs in advisories."),
+        (re.compile(r"npm install [^\n]*--force", re.IGNORECASE), "Forced dependency install command", "Low", "--force may bypass important package manager protections.", "Avoid force installs and resolve peer/dependency conflicts explicitly."),
+    ]
+    tool_specs.append(("dep-audit-py", dependency_patterns))
+
+    dataflow_patterns = [
+        (re.compile(r"(?:innerHTML|outerHTML)\s*=\s*[^\n;]+", re.IGNORECASE), "DOM injection sink", "Medium", "Dynamic HTML assignment can create XSS when data is attacker-controlled.", "Prefer textContent/DOM createElement patterns or sanitize before injection."),
+        (re.compile(r"(?:localStorage|sessionStorage)\.setItem\([^\n]{0,150}(?:token|jwt|auth|session)", re.IGNORECASE), "Sensitive session artifact in web storage", "High", "Web storage is exposed to script context and XSS abuse.", "Use HttpOnly + Secure cookies and server session controls for sensitive tokens."),
+        (re.compile(r"(?:eval\s*\(|new\s+Function\s*\()", re.IGNORECASE), "Dynamic code execution sink", "High", "Executing dynamic strings increases code injection risk.", "Replace dynamic execution with strict parsers or explicit command dispatch."),
+    ]
+    tool_specs.append(("frontend-sast-py", dataflow_patterns))
+
+    secrets_patterns = [
+        (re.compile(r"(?:api[_-]?key|secret|token)\s*[:=]\s*(?:\"|\')[A-Za-z0-9_\-]{16,}(?:\"|\')", re.IGNORECASE), "Hardcoded credential-like value", "Critical", "Credential-like string appears hardcoded in frontend-reachable code.", "Move secrets to backend and rotate exposed credentials immediately."),
+        (re.compile(r"(?:AKIA[0-9A-Z]{16}|sk_live_[0-9A-Za-z]{10,})"), "Cloud/payment key pattern detected", "Critical", "Known secret prefix signature detected.", "Revoke and rotate keys; use secure secret management outside client bundles."),
+    ]
+    tool_specs.append(("secrets-py", secrets_patterns))
+
+    selected_specs = tool_specs[:3]
+    for tool_name, patterns in selected_specs:
+        tool_issues.extend(_run_regex_tool(tool_name, payload, patterns))
+        tools_used.append(tool_name)
+
+    return tool_issues, tools_used
+
+
+def learn_when_tools_outperform_model(model_result: dict, tool_issues: list[dict]) -> int:
+    if not tool_issues:
+        return 0
+    model_keys = {_tool_issue_key(issue) for issue in model_result.get("issues", [])}
+    missed = [issue for issue in tool_issues if _tool_issue_key(issue) not in model_keys]
+    if not missed:
+        return 0
+
+    memory = load_learning_memory()
+    entries = memory.get("entries", [])
+    seen = {(e.get("title", ""), e.get("pattern", "")) for e in entries}
+
+    for issue in missed:
+        pattern = _extract_pattern(issue.get("offending_code", ""))
+        title = issue.get("title", "Potential security issue")
+        key = (title, pattern)
+        if key in seen:
+            continue
+        entries.append(
+            {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "title": title,
+                "severity": issue.get("severity", "Medium"),
+                "pattern": pattern,
+                "why": issue.get("why_this_is_a_problem", ""),
+                "fix": issue.get("suggested_fix", ""),
+                "source": "tool_missed_by_model",
+            }
+        )
+        seen.add(key)
+
+    memory["entries"] = entries[-200:]
+    save_learning_memory(memory)
+    return len(missed)
+
+
 def detect_static_security_issues(payload: dict, learning_entries: list[dict] | None = None) -> list[dict]:
+    """Regex-based high-recall vulnerability sweep used alongside model output."""
     patterns = [
         (re.compile(r"localStorage\.setItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token stored in localStorage", "High", "Client-side storage is readable by injected scripts.", "Use HttpOnly, Secure cookies and short-lived server-managed sessions."),
         (re.compile(r'postMessage\([^\n]{0,200},\s*(?:"|\')\*(?:"|\')', re.IGNORECASE), "postMessage uses wildcard target origin", "High", "Using '*' as target origin can leak data to untrusted origins.", "Set an explicit trusted origin and validate message source/origin on receipt."),
@@ -480,9 +979,19 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
         (re.compile(r"location\.(href|assign|replace)\s*=", re.IGNORECASE), "Potential open redirect sink", "Medium", "Redirect destinations may be attacker-controlled if not validated.", "Allowlist destinations and reject external/untrusted redirect targets."),
         (re.compile(r"document\.cookie\s*=", re.IGNORECASE), "Client-side cookie write detected", "Medium", "Cookies set from JS cannot be HttpOnly and are exposed to XSS.", "Prefer server-set Secure/HttpOnly cookies for sensitive session tokens."),
         (re.compile(r"eval\s*\(|new\s+Function\s*\(", re.IGNORECASE), "Dynamic code execution pattern", "High", "eval/new Function can execute attacker-influenced code.", "Remove dynamic code execution and use safe parsing/dispatch mechanisms."),
+        (re.compile(r"outerHTML\s*=", re.IGNORECASE), "Direct outerHTML assignment", "High", "outerHTML assignment is a powerful DOM injection sink.", "Avoid outerHTML for untrusted data; use safe DOM APIs."),
+        (re.compile(r"window\.addEventListener\(\s*['\"]message['\"]", re.IGNORECASE), "postMessage listener detected", "Medium", "Message listeners must validate sender origin.", "Validate event.origin against explicit trusted origins before processing."),
+        (re.compile(r"(fetch|axios\.|XMLHttpRequest)[^\n]{0,200}(http://)", re.IGNORECASE), "Insecure HTTP transport", "High", "Plain HTTP can leak sensitive traffic and tokens.", "Use HTTPS endpoints and enforce transport security."),
+        (re.compile(r"(token|secret|api[_-]?key)[^\n]{0,120}(console\.log|alert)\(", re.IGNORECASE), "Sensitive value exposed to debug output", "Medium", "Logging secrets/tokens may expose credentials in logs/devtools.", "Remove sensitive debug logs and redact credentials."),
+        (re.compile(r"(router\.push|navigate|location\.(href|assign|replace))\([^\n]{0,120}(next|redirect|returnUrl)", re.IGNORECASE), "Unvalidated redirect parameter", "Medium", "User-controlled redirect params can cause phishing/open-redirect paths.", "Allowlist redirect targets and block external destinations."),
+        (re.compile(r"setTimeout\(\s*['\"]", re.IGNORECASE), "String-based setTimeout execution", "Medium", "String-based timers behave like eval and can execute unintended code.", "Pass function references instead of executable strings."),
+        (re.compile(r"localStorage\.getItem\([^\n]{0,120}(token|jwt|auth|session)", re.IGNORECASE), "Sensitive token read from localStorage", "Medium", "Frequent token retrieval in script context increases XSS impact.", "Prefer server-managed sessions and avoid token persistence in JS-readable stores."),
+        (re.compile(r"target=\"_blank\"", re.IGNORECASE), "target=_blank usage detected", "Low", "Without rel=noopener noreferrer this can expose window.opener risks.", "Add rel=\"noopener noreferrer\" to external links using target=_blank."),
+        (re.compile(r"dangerouslySetInnerHTML\s*=\s*\{\{\s*__html:\s*[^}]+\}\}", re.IGNORECASE), "Raw HTML render path", "High", "Raw HTML render paths are high-risk when source data is not strongly sanitized.", "Use trusted markdown renderer/sanitizer and enforce strict allowlist."),
     ]
 
     issues = []
+    seen = set()
     for item in payload.get("files", []):
         file_path = str(item.get("path", "unknown"))
         content = item.get("content") or ""
@@ -493,7 +1002,12 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
             for match in regex.finditer(content):
                 line = content.count("\n", 0, match.start()) + 1
                 code_line = content[match.start() : match.start() + 180].splitlines()[0].strip()
-                issues.append(_make_issue(file_path, line, len(issues) + 1, title, severity, code_line, why, fix))
+                issue = _make_issue(file_path, line, len(issues) + 1, title, severity, code_line, why, fix)
+                key = _issue_dedupe_key(issue)
+                if key in seen:
+                    continue
+                seen.add(key)
+                issues.append(issue)
                 if len(issues) >= 120:
                     return issues
 
@@ -512,56 +1026,74 @@ def detect_static_security_issues(payload: dict, learning_entries: list[dict] | 
             if idx < 0:
                 continue
             line = content.count("\n", 0, idx) + 1
-            issues.append(
-                _make_issue(
-                    file_path,
-                    line,
-                    len(issues) + 1,
-                    f"Learned pattern match: {learned.get('title', 'Historical finding')}",
-                    learned.get("severity", "Medium"),
-                    pattern,
-                    learned.get("why", "Matched a previously observed risky pattern."),
-                    learned.get("fix", "Apply mitigation used for this known risky pattern."),
-                )
+            issue = _make_issue(
+                file_path,
+                line,
+                len(issues) + 1,
+                learned.get("title", "Historical finding"),
+                learned.get("severity", "Medium"),
+                pattern,
+                learned.get("why", "Matched a previously observed risky pattern."),
+                learned.get("fix", "Apply mitigation used for this known risky pattern."),
             )
+            key = _issue_dedupe_key(issue)
+            if key in seen:
+                continue
+            seen.add(key)
+            issues.append(issue)
             if len(issues) >= 150:
                 return issues
 
     return issues
 
 
-def merge_and_score_results(model_result: dict, heuristic_issues: list[dict], fallback_summary: dict) -> dict:
+def merge_and_score_results(
+    model_result: dict,
+    heuristic_issues: list[dict],
+    tool_issues: list[dict],
+    fallback_summary: dict,
+    tools_used: list[str],
+) -> dict:
     merged = ensure_output_shape(model_result, fallback_summary)
 
-    seen = {
-        (i.get("file", ""), int(i.get("line_number", 1) or 1), i.get("title", "").strip().lower())
-        for i in merged.get("issues", [])
-    }
-    next_id = len(merged["issues"]) + 1
-    for issue in heuristic_issues:
-        key = (issue["file"], int(issue["line_number"]), issue["title"].strip().lower())
-        if key in seen:
-            continue
-        cloned = dict(issue)
-        cloned["id"] = f"ISSUE-{next_id:03d}"
-        next_id += 1
-        merged["issues"].append(cloned)
-        seen.add(key)
+    combined = merged.get("issues", []) + heuristic_issues + tool_issues
+    deduped = dedupe_issues(combined)
 
-    if merged["issues"]:
-        weights = {"Low": 1, "Medium": 2, "High": 3, "Critical": 4}
-        total_weight = sum(weights.get(i.get("severity", "Medium"), 2) for i in merged["issues"])
-        penalty = min(90, total_weight * 3)
-        merged["overall_security_grade_percent"] = max(5, 100 - penalty)
-        merged["certainty_percent"] = max(55, int(merged.get("certainty_percent", 0) or 0))
+    normalized = []
+    for idx, issue in enumerate(deduped, start=1):
+        cloned = dict(issue)
+        cloned["id"] = f"ISSUE-{idx:03d}"
+        cloned["title"] = _normalize_issue_title(cloned.get("title", "Potential security issue"))
+        normalized.append(cloned)
+    merged["issues"] = normalized
+
+    issue_count = len(merged["issues"])
+    if issue_count:
+        weights = {"Low": 1.0, "Medium": 2.2, "High": 3.8, "Critical": 5.0}
+        weighted = sum(weights.get(i.get("severity", "Medium"), 2.2) for i in merged["issues"])
+        grade_penalty = min(94, int(weighted * 2.7 + issue_count * 0.8))
+        merged["overall_security_grade_percent"] = max(6, 100 - grade_penalty)
     else:
-        merged["overall_security_grade_percent"] = max(40, int(merged.get("overall_security_grade_percent", 0) or 0))
-        merged["certainty_percent"] = max(40, int(merged.get("certainty_percent", 0) or 0))
+        merged["overall_security_grade_percent"] = 98
+
+    model_issue_count = max(1, len(model_result.get("issues", [])))
+    tool_issue_count = len(tool_issues)
+    overlap = len({_issue_dedupe_key(i) for i in model_result.get("issues", [])} & {_issue_dedupe_key(i) for i in tool_issues})
+    agreement_ratio = overlap / max(1, tool_issue_count)
+    tool_coverage_ratio = min(1.0, tool_issue_count / max(1, issue_count))
+    files_analyzed = int(fallback_summary.get("files_analyzed", 0) or 0)
+    breadth = min(1.0, files_analyzed / 60)
+    tool_depth = min(1.0, len(tools_used) / 3)
+    certainty = int(35 + 20 * breadth + 20 * tool_depth + 15 * agreement_ratio + 10 * tool_coverage_ratio)
+    if issue_count == 0:
+        certainty = min(certainty, 72)
+    merged["certainty_percent"] = max(35, min(99, certainty))
 
     return merged
 
 
 def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
+    checklist_lines = "\n".join(f"- {c}" for c in _security_checklist_flat_checks())
     return (
         "Analyze this uploaded frontend ZIP summary as a static security review. "
         "Apply cross-file reasoning. Return STRICT JSON exactly in this shape:\n"
@@ -571,19 +1103,112 @@ def build_analysis_prompt(payload: dict, learning_context: str = "") -> str:
         "2) severity must be one of Low/Medium/High/Critical.\n"
         "3) Include concrete offending_code snippets whenever possible.\n"
         "4) line_number should be best estimate from provided file content.\n"
+        "4.1) file must be a real file path from ZIP_SUMMARY files; never output 'unknown' when code snippet maps to a file.\n"
         "5) No markdown, no comments, JSON only.\n"
         "6) Output must start with { and end with }.\n\n"
+        "7) Prefer precision over quantity; skip low-confidence items without evidence snippet/location.\n\n"
+        "8) Evaluate the code against the following security checklist. Report issues where the code violates or fails to satisfy a check "
+        "(infer from static context where possible; for server/runtime-only checks note if missing or unclear):\n"
+        f"{checklist_lines}\n\n"
         f"ZIP_SUMMARY:\n{json.dumps(payload)}\n\n"
         f"{learning_context}"
     )
 
 
-def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
+
+
+def run_openai_chatgpt_analysis(config: AppConfig, prompt: str, payload: dict) -> dict | None:
+    """Optional ChatGPT cross-check. Returns normalized strict-shape JSON or None."""
+    api_key = os.environ.get(config.openai_api_key_env, "").strip()
+    if not api_key:
+        return None
+
+    body = {
+        "model": config.openai_model,
+        "temperature": config.temperature,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    req = urllib.request.Request(
+        config.openai_base_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        text = parsed["choices"][0]["message"]["content"]
+        return ensure_output_shape(parse_json_from_text(text), payload)
+    except Exception:
+        return None
+
+
+def run_claude_analysis(config: AppConfig, prompt: str, payload: dict) -> dict | None:
+    """Optional Claude cross-check. Returns normalized strict-shape JSON or None."""
+    api_key = os.environ.get(config.claude_api_key_env, "").strip()
+    if not api_key:
+        return None
+
+    body = {
+        "model": config.claude_model,
+        "max_tokens": 2500,
+        "temperature": config.temperature,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    req = urllib.request.Request(
+        config.claude_base_url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+    try:
+        parsed = json.loads(raw)
+        content = parsed.get("content", [])
+        text = ""
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text += part.get("text", "")
+        if not text:
+            return None
+        return ensure_output_shape(parse_json_from_text(text), payload)
+    except Exception:
+        return None
+
+
+def run_ollama_analysis(config: AppConfig, payload: dict, zip_path: Path | None = None) -> dict:
     learning_memory = load_learning_memory()
     learning_context = build_learning_context(config)
     bootstrap_context = build_bootstrap_context()
     combined_context = "\n\n".join(part for part in [learning_context, bootstrap_context] if part)
-    prompt = f"{SYSTEM_PROMPT}\n\n{build_analysis_prompt(payload, combined_context)}"
+    analysis_prompt = build_analysis_prompt(payload, combined_context)
+    prompt = f"{SYSTEM_PROMPT}\n\n{analysis_prompt}"
     ollama_exec = resolve_ollama_executable(config)
 
     env = os.environ.copy()
@@ -643,8 +1268,28 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     except Exception:
         model_result = build_fallback_result_from_text(proc.stdout, payload)
 
+    chatgpt_result = run_openai_chatgpt_analysis(config, analysis_prompt, payload)
+    chatgpt_issues = annotate_source_issues(chatgpt_result.get("issues", []), "chatgpt") if chatgpt_result else []
+    claude_result = run_claude_analysis(config, analysis_prompt, payload)
+    claude_issues = annotate_source_issues(claude_result.get("issues", []), "claude") if claude_result else []
+
     heuristic_issues = detect_static_security_issues(payload, learning_memory.get("entries", []))
-    fixed = merge_and_score_results(model_result, heuristic_issues, payload)
+    tool_issues, tools_used = run_internal_library_analyses(payload, config)
+
+    cross_llm_issues = dedupe_issues(chatgpt_issues + claude_issues)
+    merged_model_issues = dedupe_issues(model_result.get("issues", []) + cross_llm_issues)
+    merged_external_issues = dedupe_issues(tool_issues + cross_llm_issues)
+    learn_when_tools_outperform_model(model_result, merged_external_issues)
+
+    used_llms = ([] if not chatgpt_issues else ["chatgpt"]) + ([] if not claude_issues else ["claude"])
+    fixed = merge_and_score_results(
+        {**model_result, "issues": merged_model_issues},
+        heuristic_issues,
+        tool_issues + cross_llm_issues,
+        payload,
+        tools_used + used_llms,
+    )
+    fixed = resolve_issue_locations(fixed, payload)
 
     file_content = {item["path"]: item.get("content", "") for item in payload.get("files", [])}
     for issue in fixed["issues"]:
@@ -654,16 +1299,18 @@ def run_ollama_analysis(config: AppConfig, payload: dict) -> dict:
     if bootstrap_context:
         mark_bootstrap_examples_applied()
 
+
     return fixed
 
 
-def analyze_with_local_llm(config: AppConfig, payload: dict) -> dict:
+def analyze_with_local_llm(config: AppConfig, payload: dict, zip_path: Path | None = None) -> dict:
     if config.local_provider == "ollama":
-        return run_ollama_analysis(config, payload)
+        return run_ollama_analysis(config, payload, zip_path)
     raise RuntimeError(f"Unsupported local.provider: {config.local_provider}")
 
 
 class ZipSecurityApp:
+    """Tk desktop app wrapper that orchestrates analysis, display, and fix-export workflows."""
     def __init__(self, root: Tk):
         self.root = root
         self.root.title("Frontend ZIP Security Analyzer")
@@ -673,12 +1320,16 @@ class ZipSecurityApp:
         self.selected_files: list[Path] = []
         self.result_queue: queue.Queue = queue.Queue()
         self.results_cache = []
+        self.issue_lookup: dict[str, tuple[dict, str]] = {}
+        self.selected_issue: dict | None = None
+        self.selected_issue_zip: str = ""
 
         self.status = StringVar(value="Upload ZIP file(s) to run local-LLM frontend security analysis.")
         self.grade = StringVar(value="--")
         self.certainty = StringVar(value="--")
         self.files_count = StringVar(value="--")
         self.issue_count = StringVar(value="--")
+        self.progress = DoubleVar(value=0.0)
 
         self._build_ui()
         self._poll_results()
@@ -695,6 +1346,7 @@ class ZipSecurityApp:
         style.configure("Sub.TLabel", background="#eef3fb", foreground="#5f6368", font=("Segoe UI", 10))
         style.configure("Bubble.TButton", background="#1a73e8", foreground="#ffffff", padding=(12, 8), borderwidth=0)
         style.map("Bubble.TButton", background=[("active", "#1967d2")])
+        style.configure("Horizontal.TProgressbar", background="#1a73e8", troughcolor="#e0e7f0", bordercolor="#e0e7f0", lightcolor="#1a73e8", darkcolor="#1557b0", thickness=12)
 
         container = ttk.Frame(self.root, style="Dark.TFrame", padding=14)
         container.pack(fill="both", expand=True)
@@ -720,9 +1372,12 @@ class ZipSecurityApp:
         controls.pack(fill="x", pady=(0, 10))
         ttk.Button(controls, text="Upload ZIP Files", style="Bubble.TButton", command=self.select_files).pack(side="left")
         ttk.Button(controls, text="Run Local Analysis", style="Bubble.TButton", command=self.run_analysis).pack(side="left", padx=8)
-        ttk.Button(controls, text="Teach From Current Results", style="Bubble.TButton", command=self.teach_from_current_results).pack(side="left", padx=8)
+        ttk.Button(controls, text="Configure Providers", style="Bubble.TButton", command=self.open_config_window).pack(side="left", padx=8)
         ttk.Button(controls, text="Export Visible JSON", style="Bubble.TButton", command=self.save_output).pack(side="left")
         ttk.Label(controls, textvariable=self.status, style="Sub.TLabel").pack(side="left", padx=12)
+
+        self.progress_bar = ttk.Progressbar(container, mode="determinate", variable=self.progress, maximum=100)
+        self.progress_bar.pack(fill="x", pady=(0, 10))
 
         main = ttk.Panedwindow(container, orient="horizontal")
         main.pack(fill="both", expand=True)
@@ -733,35 +1388,175 @@ class ZipSecurityApp:
         main.add(right, weight=3)
 
         ttk.Label(left, text="Selected ZIP Files", style="CardTitle.TLabel").pack(anchor="w")
-        self.file_list = Text(left, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=14, relief="flat")
+        self.file_list = ScrolledText(left, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=14, relief="flat", wrap="none")
         self.file_list.pack(fill="both", expand=True, pady=(6, 0))
 
         ttk.Label(right, text="Findings", style="CardTitle.TLabel").pack(anchor="w")
-        cols = ("id", "severity", "file", "line", "title")
-        self.issues_tree = ttk.Treeview(right, columns=cols, show="headings", height=12)
-        for col, width in [("id", 90), ("severity", 90), ("file", 260), ("line", 70), ("title", 380)]:
-            self.issues_tree.heading(col, text=col.upper())
-            self.issues_tree.column(col, width=width, anchor="w")
-        self.issues_tree.pack(fill="x", pady=(6, 8))
-        self.issues_tree.bind("<<TreeviewSelect>>", self._on_issue_selected)
+        # Findings table: bordered header with drag-to-resize, scrollable body, uniform row width, severity column colored only
+        self._findings_col_widths = [90, 90, 260, 70, 380]
+        self._findings_min_col_width = 40
+        self._findings_resize_col: int | None = None
+        self._findings_resize_start_x: float = 0.0
+        self._findings_resize_start_width: int = 0
+        self._findings_table_wrapper = Frame(right, bg="#d1d5db", relief="solid", bd=1)
+        self._findings_table_wrapper.pack(fill=BOTH, expand=True, pady=(6, 8))
+        self._findings_header = Frame(self._findings_table_wrapper, bg="#e5e7eb", height=28)
+        self._findings_header.pack(fill="x")
+        self._findings_header.pack_propagate(False)
+        for c, col_name in enumerate(("ID", "SEVERITY", "FILE", "LINE", "TITLE")):
+            w = self._findings_col_widths[c]
+            cell = Frame(self._findings_header, bg="#f3f4f6", relief="solid", bd=1)
+            cell.grid(row=0, column=c, sticky="nsew")
+            lbl = Label(cell, text=col_name, anchor="w", bg="#f3f4f6", fg="#374151", font=("Segoe UI", 9, "bold"), padx=6, pady=4)
+            lbl.pack(side="left", fill=BOTH, expand=True)
+            if c < len(self._findings_col_widths) - 1:
+                grip = Frame(cell, bg="#d1d5db", width=4, cursor="sb_h_double_arrow")
+                grip.pack(side="right", fill="y", padx=0)
+                grip.pack_propagate(False)
+                grip.bind("<Button-1>", lambda e, col=c: self._findings_resize_start(e, col))
+            else:
+                grip = Frame(cell, bg="#d1d5db", width=4, cursor="sb_h_double_arrow")
+                grip.pack(side="right", fill="y", padx=0)
+                grip.pack_propagate(False)
+                grip.bind("<Button-1>", lambda e, col=c: self._findings_resize_start(e, col))
+            self._findings_header.columnconfigure(c, minsize=w)
+        self.root.bind("<B1-Motion>", self._findings_resize_motion)
+        self.root.bind("<ButtonRelease-1>", self._findings_resize_end)
+        self._findings_canvas = Canvas(self._findings_table_wrapper, bg="#d1d5db", highlightthickness=0)
+        self._findings_scroll = ttk.Scrollbar(self._findings_table_wrapper)
+        self._findings_body = Frame(self._findings_canvas, bg="#ffffff")
+        self._findings_body_id = self._findings_canvas.create_window((0, 0), window=self._findings_body, anchor="nw")
+        self._findings_canvas.configure(yscrollcommand=self._findings_scroll.set)
+        self._findings_scroll.configure(command=self._findings_canvas.yview)
+        self._findings_canvas.pack(fill=BOTH, expand=True)
+        self._findings_scroll.pack(side="right", fill="y")
+        self._findings_row_frames: list[tuple[Frame, list[tuple[Frame, Label]], str]] = []  # (row_frame, [(cell_frame, label), ...], key)
+        self._findings_selected_row: int | None = None
+        self._findings_canvas.bind("<Configure>", self._on_findings_canvas_configure)
+        self._findings_body.bind("<Configure>", self._on_findings_body_configure)
 
-        ttk.Label(right, text="Issue Details", style="CardTitle.TLabel").pack(anchor="w")
-        self.issue_details = Text(right, bg="#f8f9fa", fg="#202124", insertbackground="#202124", height=6, relief="flat")
-        self.issue_details.pack(fill="x", pady=(6, 8))
+        details_header = ttk.Frame(right, style="Card.TFrame")
+        details_header.pack(fill="x")
+        ttk.Label(details_header, text="Issue Details", style="CardTitle.TLabel").pack(side="left", anchor="w")
+        self.fix_button = ttk.Button(details_header, text="Generate Fixed File", style="Bubble.TButton", command=self.generate_fix_for_selected_issue)
+        self.fix_button.pack(side="right")
+        self.fix_button.state(["disabled"])
+        self.issue_details = ScrolledText(
+            right,
+            bg="#ffffff",
+            fg="#202124",
+            insertbackground="#202124",
+            height=14,
+            relief="flat",
+            wrap="word",
+            font=("Segoe UI", 10),
+        )
+        self.issue_details.pack(fill="both", expand=True, pady=(6, 8))
+        self.issue_details.tag_configure("title", font=("Segoe UI", 12, "bold"), foreground="#1a73e8")
+        self.issue_details.tag_configure("section", font=("Segoe UI", 10, "bold"), foreground="#5f6368")
+        self.issue_details.tag_configure("body", font=("Segoe UI", 10), foreground="#202124")
+        self.issue_details.tag_configure("meta", font=("Segoe UI", 9), foreground="#5f6368")
+        self.issue_details.tag_configure("code", font=("Consolas", 9), foreground="#202124", background="#eef3fb")
 
-        self.output_tabs = ttk.Notebook(right)
-        self.output_tabs.pack(fill="both", expand=True)
+    def _on_findings_canvas_configure(self, event):
+        self._findings_canvas.itemconfigure(self._findings_body_id, width=event.width)
 
-        human_tab = ttk.Frame(self.output_tabs, style="Card.TFrame")
-        json_tab = ttk.Frame(self.output_tabs, style="Card.TFrame")
-        self.output_tabs.add(human_tab, text="Human Readable Report")
-        self.output_tabs.add(json_tab, text="Raw JSON")
+    def _on_findings_body_configure(self, _event=None):
+        self._findings_canvas.configure(scrollregion=self._findings_canvas.bbox("all"))
 
-        self.human_output = Text(human_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat")
-        self.human_output.pack(fill="both", expand=True, pady=(6, 0))
+    def _truncate_cell_text(self, text: str, pixel_width: int) -> str:
+        """Truncate text to fit within pixel width (approx 7px per char for Segoe UI 9pt)."""
+        if not text:
+            return ""
+        pad = 12
+        n = max(1, (pixel_width - pad) // 7)
+        s = str(text)
+        return (s[: n - 3] + "...") if len(s) > n else s
 
-        self.output = Text(json_tab, bg="#f8f9fa", fg="#202124", insertbackground="#202124", relief="flat")
-        self.output.pack(fill="both", expand=True, pady=(6, 0))
+    def _findings_resize_start(self, event, col: int):
+        self._findings_resize_col = col
+        self._findings_resize_start_x = event.x_root
+        self._findings_resize_start_width = self._findings_col_widths[col]
+
+    def _findings_resize_motion(self, event):
+        if self._findings_resize_col is None:
+            return
+        delta = event.x_root - self._findings_resize_start_x
+        new_w = max(self._findings_min_col_width, self._findings_resize_start_width + int(delta))
+        if new_w == self._findings_col_widths[self._findings_resize_col]:
+            return
+        self._findings_col_widths[self._findings_resize_col] = new_w
+        self._findings_resize_start_x = event.x_root
+        self._findings_resize_start_width = new_w
+        self._apply_findings_column_widths()
+
+    def _findings_resize_end(self, event):
+        self._findings_resize_col = None
+
+    def _apply_findings_column_widths(self):
+        """Apply current column widths to header and all body rows; retruncate cell text."""
+        for c, w in enumerate(self._findings_col_widths):
+            self._findings_header.columnconfigure(c, minsize=w)
+        for row_frame, cells, key in self._findings_row_frames:
+            issue, _ = self.issue_lookup.get(key, ({}, ""))
+            vals = (
+                issue.get("id", ""),
+                issue.get("severity", ""),
+                issue.get("file", ""),
+                str(issue.get("line_number", "")),
+                issue.get("title", ""),
+            )
+            for c, w in enumerate(self._findings_col_widths):
+                row_frame.columnconfigure(c, minsize=w)
+                _, lbl = cells[c]
+                txt = self._truncate_cell_text(vals[c], w)
+                lbl.configure(text=txt)
+        total_w = sum(self._findings_col_widths)
+        self._findings_body.configure(width=total_w)
+
+    def _severity_cell_colors(self, issue: dict) -> tuple[str, str]:
+        """Return (background, foreground) for severity column only."""
+        colors = {
+            "Critical": ("#b91c1c", "white"),
+            "High": ("#dc2626", "white"),
+            "Medium": ("#ea580c", "white"),
+            "Low": ("#eab308", "#1f2937"),
+        }
+        sev = str(issue.get("severity", "Medium")).title()
+        return colors.get(sev, ("#ea580c", "white"))
+
+    def _on_findings_row_click(self, key: str):
+        for _i, (_frame, cells, k) in enumerate(self._findings_row_frames):
+            for j, (cell_frame, lbl) in enumerate(cells):
+                if j != 1:
+                    if k == key:
+                        cell_frame.configure(bg="#e3f2fd")
+                        lbl.configure(bg="#e3f2fd")
+                    else:
+                        cell_frame.configure(bg="#ffffff")
+                        lbl.configure(bg="#ffffff")
+        self._findings_selected_row = int(key.split("-")[1]) - 1
+        issue_info = self.issue_lookup.get(key)
+        if not issue_info:
+            return
+        issue, issue_zip = issue_info
+        self.selected_issue = issue
+        self.selected_issue_zip = issue_zip
+        self.issue_details.delete("1.0", END)
+        title = issue.get("title", "")
+        self.issue_details.insert(END, title + "\n", "title")
+        self.issue_details.insert(END, f"{issue.get('id', '')}  ·  {issue.get('severity', '')}  ·  {issue.get('file', '')}:{issue.get('line_number', '')}\n\n", "meta")
+        self.issue_details.insert(END, "Why this matters\n", "section")
+        self.issue_details.insert(END, (issue.get("why_this_is_a_problem") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Recommended fix\n", "section")
+        self.issue_details.insert(END, (issue.get("suggested_fix") or "—") + "\n\n", "body")
+        self.issue_details.insert(END, "Offending code\n", "section")
+        code = (issue.get("offending_code") or "—").strip()
+        self.issue_details.insert(END, code if code else "—", "code")
+        if self.can_generate_fix(issue):
+            self.fix_button.state(["!disabled"])
+        else:
+            self.fix_button.state(["disabled"])
 
     def _metric_card(self, parent, title: str, value_var: StringVar):
         frame = ttk.Frame(parent, style="Card.TFrame", padding=10)
@@ -780,6 +1575,7 @@ class ZipSecurityApp:
         self.status.set(f"Loaded {len(self.selected_files)} ZIP file(s).")
 
     def run_analysis(self):
+        """Start async analysis and reset visible outputs/progress state."""
         if not self.selected_files:
             messagebox.showwarning("No files selected", "Please upload at least one ZIP file.")
             return
@@ -789,162 +1585,282 @@ class ZipSecurityApp:
             return
 
         config = load_properties(CONFIG_FILE)
-        self.status.set(f"Running local analysis via {config.local_provider}:{config.local_model}...")
-        self.output.delete("1.0", END)
-        self.human_output.delete("1.0", END)
+        chatgpt_enabled = bool(os.environ.get(config.openai_api_key_env, "").strip())
+        claude_enabled = bool(os.environ.get(config.claude_api_key_env, "").strip())
+        extras = []
+        if chatgpt_enabled:
+            extras.append("chatgpt")
+        if claude_enabled:
+            extras.append("claude")
+        suffix = " + " + ",".join(extras) if extras else ""
+        mode_label = f"{config.local_provider}:{config.local_model}" + suffix
+        self.status.set(f"Running local analysis via {mode_label}...")
         self.issue_details.delete("1.0", END)
+        self.progress.set(0)
         self._clear_findings_table()
         threading.Thread(target=self._analyze_worker, args=(config,), daemon=True).start()
 
     def _analyze_worker(self, config: AppConfig):
+        """Background worker: analyze each ZIP, emit progress, and return aggregate payload."""
         OUTPUT_DIR.mkdir(exist_ok=True)
         aggregate = []
         try:
-            for zip_path in self.selected_files:
+            total = max(1, len(self.selected_files))
+            for idx, zip_path in enumerate(self.selected_files, start=1):
+                # Progress slice for this file: 0-15% summarize, 15-95% model, 95-100% finalize
+                slice_start = ((idx - 1) / total) * 95
+                slice_end = (idx / total) * 95
+                self.result_queue.put(("progress", {"percent": slice_start, "message": f"Summarizing {zip_path.name}..."}))
                 summary = summarize_zip(
                     zip_path,
                     config.max_files,
                     config.max_bytes_per_file,
                     config.max_total_chars,
                 )
-                result = analyze_with_local_llm(config, summary)
+                self.result_queue.put(("progress", {"percent": slice_start + (slice_end - slice_start) * 0.15, "message": f"Running model analysis for {zip_path.name}..."}))
+                result = analyze_with_local_llm(config, summary, zip_path)
                 outfile = OUTPUT_DIR / f"{zip_path.stem}.analysis.json"
                 outfile.write_text(json.dumps(result, indent=2), encoding="utf-8")
                 aggregate.append({"zip": str(zip_path), "output_json": str(outfile), "result": result})
+                self.result_queue.put(("progress", {"percent": slice_end, "message": f"Completed {zip_path.name}"}))
+            self.result_queue.put(("progress", {"percent": 100, "message": "Done."}))
             self.result_queue.put(("ok", aggregate))
         except Exception as ex:
             self.result_queue.put(("err", str(ex)))
 
     def _clear_findings_table(self):
-        for row in self.issues_tree.get_children():
-            self.issues_tree.delete(row)
+        """Clear current issue rows/details before a new scan or refresh."""
+        for frame, _labels, _key in self._findings_row_frames:
+            frame.destroy()
+        self._findings_row_frames.clear()
         self.issue_details.delete("1.0", END)
+        self.fix_button.state(["disabled"])
+        self.selected_issue = None
+        self.selected_issue_zip = ""
+        self._findings_selected_row = None
+
+    def _severity_sort_key(self, issue: dict) -> int:
+        """Order: Critical=0, High=1, Medium=2, Low=3 (most severe first)."""
+        order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+        return order.get(str(issue.get("severity", "Medium")).title(), 2)
 
     def _refresh_dashboard(self, aggregate_results: list[dict]):
         if not aggregate_results:
             return
 
         first = aggregate_results[0]["result"]
-        all_issues = []
+        # Collect (issue, zip_path) then sort by severity (Critical first, then High, Medium, Low)
+        flat = []
         for item in aggregate_results:
-            all_issues.extend(item["result"].get("issues", []))
+            zip_path = str(item.get("zip", ""))
+            for issue in item["result"].get("issues", []):
+                flat.append((issue, zip_path))
+        flat.sort(key=lambda x: self._severity_sort_key(x[0]))
+
+        self.issue_lookup = {}
+        for row_index, (issue, zip_path) in enumerate(flat, start=1):
+            key = f"issue-{row_index}"
+            self.issue_lookup[key] = (issue, zip_path)
 
         self.grade.set(f"{first.get('overall_security_grade_percent', 0)}%")
         self.certainty.set(f"{first.get('certainty_percent', 0)}%")
         self.files_count.set(str(sum(item["result"].get("files_analyzed", 0) for item in aggregate_results)))
-        self.issue_count.set(str(len(all_issues)))
+        self.issue_count.set(str(len(flat)))
 
         self._clear_findings_table()
-        for issue in all_issues:
-            self.issues_tree.insert(
-                "",
-                END,
-                values=(
-                    issue.get("id", ""),
-                    issue.get("severity", ""),
-                    issue.get("file", ""),
-                    issue.get("line_number", ""),
-                    issue.get("title", ""),
-                ),
+        cell_font = ("Segoe UI", 9)
+        row_height = 26
+        total_table_width = sum(self._findings_col_widths)
+        self._findings_body.configure(width=total_table_width)
+        for row_index, (issue, zip_path) in enumerate(flat, start=1):
+            key = f"issue-{row_index}"
+            row_frame = Frame(self._findings_body, bg="#ffffff", cursor="hand2", height=row_height)
+            row_frame.grid(row=row_index - 1, column=0, sticky="ew")
+            row_frame.grid_propagate(False)
+            self._findings_body.columnconfigure(0, weight=1)
+            vals = (
+                issue.get("id", ""),
+                issue.get("severity", ""),
+                issue.get("file", ""),
+                str(issue.get("line_number", "")),
+                issue.get("title", ""),
             )
-
-    def _on_issue_selected(self, _event=None):
-        selected = self.issues_tree.selection()
-        if not selected:
-            return
-        values = self.issues_tree.item(selected[0], "values")
-        if not values:
-            return
-        issue_id = values[0]
-        issue = None
-        for pack in self.results_cache:
-            for candidate in pack.get("result", {}).get("issues", []):
-                if candidate.get("id") == issue_id:
-                    issue = candidate
-                    break
-            if issue:
-                break
-        if not issue:
-            return
-
-        text = (
-            f"ID: {issue.get('id', '')}\n"
-            f"Severity: {issue.get('severity', '')}\n"
-            f"File: {issue.get('file', '')}:{issue.get('line_number', '')}\n"
-            f"Title: {issue.get('title', '')}\n\n"
-            f"Why: {issue.get('why_this_is_a_problem', '')}\n\n"
-            f"Suggested fix: {issue.get('suggested_fix', '')}\n\n"
-            f"Code: {issue.get('offending_code', '')}"
-        )
-        self.issue_details.delete("1.0", END)
-        self.issue_details.insert(END, text)
-
-    def _render_human_readable(self, aggregate_results: list[dict]) -> str:
-        lines = ["Frontend Security Analysis Report", "=" * 36, ""]
-        total_files = sum(item["result"].get("files_analyzed", 0) for item in aggregate_results)
-        all_issues = []
-        for item in aggregate_results:
-            all_issues.extend(item["result"].get("issues", []))
-
-        severity_counts = {"Critical": 0, "High": 0, "Medium": 0, "Low": 0}
-        for issue in all_issues:
-            sev = issue.get("severity", "Medium")
-            if sev in severity_counts:
-                severity_counts[sev] += 1
-
-        first = aggregate_results[0]["result"] if aggregate_results else {}
-        lines.append(f"Overall grade: {first.get('overall_security_grade_percent', 0)}%")
-        lines.append(f"Certainty: {first.get('certainty_percent', 0)}%")
-        lines.append(f"Files analyzed: {total_files}")
-        lines.append(f"Issues found: {len(all_issues)}")
-        lines.append("Severity histogram: " + ", ".join(f"{k}={v}" for k, v in severity_counts.items()))
-        lines.append("")
-
-        for issue in all_issues[:120]:
-            lines.append(f"[{issue.get('id')}] {issue.get('severity')} - {issue.get('title')}")
-            lines.append(f"  Location: {issue.get('file')}:{issue.get('line_number')}")
-            lines.append(f"  Why: {issue.get('why_this_is_a_problem')}")
-            lines.append(f"  Fix: {issue.get('suggested_fix')}")
-            if issue.get("offending_code"):
-                lines.append(f"  Code: {issue.get('offending_code')}")
-            lines.append("")
-
-        return "\n".join(lines)
+            sev_bg, sev_fg = self._severity_cell_colors(issue)
+            cells = []
+            for c, w in enumerate(self._findings_col_widths):
+                val = vals[c]
+                display_text = self._truncate_cell_text(val, w)
+                bg = sev_bg if c == 1 else "#ffffff"
+                fg = sev_fg if c == 1 else "#202124"
+                cell_frame = Frame(row_frame, bg=bg, relief="solid", bd=1, highlightbackground="#e5e7eb")
+                cell_frame.grid(row=0, column=c, sticky="nsew", padx=0, pady=0)
+                lbl = Label(
+                    cell_frame,
+                    text=display_text,
+                    anchor="w",
+                    bg=bg,
+                    fg=fg,
+                    font=cell_font,
+                    padx=6,
+                    pady=2,
+                )
+                lbl.pack(fill=BOTH, expand=True)
+                row_frame.columnconfigure(c, minsize=w)
+                cells.append((cell_frame, lbl))
+            for (cf, lbl) in cells:
+                cf.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+                lbl.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+            row_frame.bind("<Button-1>", lambda e, k=key: self._on_findings_row_click(k))
+            self._findings_row_frames.append((row_frame, cells, key))
 
     def _poll_results(self):
         try:
             status, payload = self.result_queue.get_nowait()
+            if status == "progress":
+                self.progress.set(float(payload.get("percent", 0)))
+                self.status.set(payload.get("message", "Analyzing..."))
+                self.root.after(250, self._poll_results)
+                return
             if status == "ok":
                 self.results_cache = payload
                 self.status.set("Analysis complete.")
+                self.progress.set(100)
                 self._refresh_dashboard(payload)
-                self.output.insert(END, json.dumps(payload, indent=2))
-                self.human_output.insert(END, self._render_human_readable(payload))
+                learn_from_result_pack(payload)
             else:
                 self.status.set("Analysis failed.")
-                self.output.insert(END, payload)
-                self.human_output.insert(END, "Analysis failed before report generation.")
+                self.progress.set(0)
                 messagebox.showerror("Analysis failed", payload)
         except queue.Empty:
             pass
         self.root.after(250, self._poll_results)
 
-    def teach_from_current_results(self):
-        if not self.results_cache:
-            messagebox.showinfo("No results", "Run an analysis first, then teach from those findings.")
+    def can_generate_fix(self, issue: dict) -> bool:
+        """Return True when the selected issue type has a deterministic auto-fix strategy."""
+        title = str(issue.get("title", "")).lower()
+        code = str(issue.get("offending_code", ""))
+        if "innerhtml" in title or "outerhtml" in title:
+            return True
+        if "postmessage" in title and "*" in code:
+            return True
+        if "target=_blank" in title or "target=\"_blank\"" in code:
+            return True
+        if "eval" in title or "new function" in title:
+            return True
+        return False
+
+    def apply_fix_to_content(self, content: str, issue: dict) -> str | None:
+        """Apply narrow, safe-by-default code transforms for fixable issue categories."""
+        title = str(issue.get("title", "")).lower()
+        code = str(issue.get("offending_code", ""))
+
+        if "innerhtml" in title:
+            return content.replace("innerHTML", "textContent")
+        if "outerhtml" in title:
+            return content.replace("outerHTML", "textContent")
+        if "postmessage" in title and "*" in code:
+            return content.replace(", '*'", ", window.location.origin").replace(', "*"', ", window.location.origin")
+        if "target=_blank" in title or 'target="_blank"' in code:
+            return content.replace('target="_blank"', 'target="_blank" rel="noopener noreferrer"')
+        if "eval" in title or "new function" in title:
+            return content.replace("eval(", "/* FIX_REQUIRED: removed eval */ (")
+        return None
+
+    def generate_fix_for_selected_issue(self):
+        """Generate a patched file for the selected issue when a deterministic fix exists."""
+        issue = self.selected_issue
+        zip_path = self.selected_issue_zip
+        if not issue or not zip_path:
+            messagebox.showinfo("No issue selected", "Select an issue with an available fix first.")
             return
-        learn_from_result_pack(self.results_cache)
-        memory = load_learning_memory()
-        messagebox.showinfo("Learning updated", f"Stored examples: {len(memory.get('entries', []))}")
+        if not self.can_generate_fix(issue):
+            messagebox.showinfo("Fix unavailable", "No deterministic auto-fix is available for this issue type.")
+            return
+
+        file_path = str(issue.get("file", "")).strip()
+        if not file_path:
+            messagebox.showwarning("Missing file", "This issue has no file path and cannot be auto-fixed.")
+            return
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as archive:
+                raw = archive.read(file_path)
+            original = raw.decode("utf-8", errors="replace")
+        except Exception as ex:
+            messagebox.showerror("Fix generation failed", f"Could not read source file from ZIP: {ex}")
+            return
+
+        fixed = self.apply_fix_to_content(original, issue)
+        if not fixed or fixed == original:
+            messagebox.showinfo("No change", "Could not safely generate a changed file for this issue.")
+            return
+
+        zip_stem = Path(zip_path).stem
+        out_file = OUTPUT_DIR / "fixed" / zip_stem / file_path
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(fixed, encoding="utf-8")
+        messagebox.showinfo("Fixed file generated", f"Saved: {out_file}")
+
+    def open_config_window(self):
+        """Open a lightweight config editor for provider settings and persist to config.properties."""
+        config = load_properties(CONFIG_FILE)
+        win = Toplevel(self.root)
+        win.title("Configure Providers")
+        win.geometry("700x420")
+
+        fields = [
+            ("local.model", config.local_model),
+            ("local.ollamaCommand", config.ollama_command),
+            ("local.ollamaPath", config.ollama_path_hint),
+            ("openai.model", config.openai_model),
+            ("openai.apiKeyEnv", config.openai_api_key_env),
+            ("openai.baseUrl", config.openai_base_url),
+            ("claude.model", config.claude_model),
+            ("claude.apiKeyEnv", config.claude_api_key_env),
+            ("claude.baseUrl", config.claude_base_url),
+            ("sonar.url", config.sonar_url),
+            ("sonar.tokenEnv", config.sonar_token_env),
+            ("sonar.projectKey", config.sonar_project_key),
+        ]
+        vars_map: dict[str, StringVar] = {}
+        body = ttk.Frame(win, padding=12)
+        body.pack(fill="both", expand=True)
+        for i, (k, v) in enumerate(fields):
+            ttk.Label(body, text=k).grid(row=i, column=0, sticky="w", pady=4)
+            var = StringVar(value=str(v))
+            vars_map[k] = var
+            ttk.Entry(body, textvariable=var, width=70).grid(row=i, column=1, sticky="ew", pady=4)
+        body.columnconfigure(1, weight=1)
+
+        def save_config():
+            lines = Path(CONFIG_FILE).read_text(encoding="utf-8").splitlines()
+            updates = {k: vars_map[k].get() for k, _ in fields}
+            out_lines = []
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    out_lines.append(line)
+                    continue
+                key, _ = stripped.split("=", 1)
+                key = key.strip()
+                if key in updates:
+                    out_lines.append(f"{key}={updates[key]}")
+                else:
+                    out_lines.append(line)
+            Path(CONFIG_FILE).write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+            messagebox.showinfo("Saved", "Configuration updated.")
+            win.destroy()
+
+        ttk.Button(body, text="Save", style="Bubble.TButton", command=save_config).grid(row=len(fields) + 1, column=1, sticky="e", pady=10)
 
     def save_output(self):
-        content = self.output.get("1.0", END).strip()
-        if not content:
-            messagebox.showinfo("No output", "No JSON output is currently visible.")
+        if not self.results_cache:
+            messagebox.showinfo("No output", "Run an analysis first to export JSON.")
             return
         save_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
         if not save_path:
             return
+        content = json.dumps(self.results_cache, indent=2)
         Path(save_path).write_text(content, encoding="utf-8")
         messagebox.showinfo("Saved", f"Saved JSON to {save_path}")
 

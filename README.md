@@ -1,13 +1,13 @@
 # Frontend ZIP Security Analyzer (Local LLM)
 
-A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM** (no remote API), and outputs strict JSON.
+A Windows desktop app that lets you upload frontend ZIP archives, runs static frontend security analysis with a **local LLM**, and outputs strict JSON. It can optionally cross-check findings with ChatGPT when configured.
 
 ## Local-LLM approach
-This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider.
+This app now uses a local model runtime inspired by local-LLM workflows (MCP-oriented/dev-local architecture), with **Ollama** as the default provider and optional **ChatGPT/Claude** cross-checking.
 
-- No remote OpenAI call is made.
-- Analysis runs by invoking `ollama run <model> <prompt>`.
-- Model/provider are configurable in `config.properties`.
+- Local analysis runs by invoking `ollama run <model> <prompt>`.
+- Optional ChatGPT analysis can be enabled for side-by-side finding comparison by setting an API key environment variable.
+- Models/providers are configurable in `config.properties`.
 
 ## Required local setup
 Install Ollama and pull a model (example):
@@ -67,10 +67,19 @@ local.ollamaCommand=ollama
 # optional absolute path, useful when .exe PATH does not include Ollama
 local.ollamaPath=
 local.temperature=0.1
+
+# optional ChatGPT cross-check (API key stays in environment variable)
+openai.model=gpt-4o-mini
+openai.apiKeyEnv=OPENAI_API_KEY
+openai.baseUrl=https://api.openai.com/v1/chat/completions
+claude.model=claude-3-5-sonnet-20241022
+claude.apiKeyEnv=ANTHROPIC_API_KEY
+claude.baseUrl=https://api.anthropic.com/v1/messages
+
 analysis.maxFiles=300
 analysis.maxBytesPerFile=9000
 analysis.maxTotalChars=180000
-learning.maxExamples=6
+learning.maxExamples=12
 ```
 
 ## Run in development
@@ -106,13 +115,31 @@ The app now tries, in order:
 
 This issue is unrelated to ZIP file paths; ZIP handling happens after the Ollama executable is resolved.
 
+
+## Internal library cross-check (up to 3 tools)
+Each run now compares local-LLM findings against up to three internal Python-based analyzers and merges all findings into the same JSON result shape used by the UI/export.
+
+Tool selection order:
+1. `sonarqube` analyzer (preferred when SonarQube Python package or `sonar-scanner` is available)
+2. dependency-focused analyzer (`dep-audit-py`)
+3. frontend sink/dataflow analyzer (`frontend-sast-py`)
+4. secret-pattern analyzer (`secrets-py`)
+
+Only the first 3 available analyzers are used per run.
+
+The app can also query ChatGPT and Claude with the same prompt/temperature used for local analysis and merge those findings into the same output JSON shape when their respective API key env vars are present.
+
+ChatGPT findings are merged (not just compared) into the app result list with deduplication. Tool/ChatGPT findings missed by the local model are automatically added to learning memory so future model prompts include those patterns.
+
+The merge stage now de-duplicates overlapping findings (including learned-pattern repeats) and computes grade/certainty with a weighted formula that factors severity mix, analyzer breadth, and model/tool agreement.
+
 ## Continuous local learning
 You can iteratively improve local results without cloud training:
-- Run analysis
-- Click **Teach From Current Results** to save findings into `learning_memory.json`
+- Run analysis (learning now happens automatically after each successful run)
+- Findings are persisted into `learning_memory.json` without manual action
 - Future runs inject these examples into prompt context and also match learned patterns directly in code
 
-On the **first run only**, the app also injects a built-in bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, hardcoded secrets, open redirects, etc.) so the local model starts with calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
+On the **first run only**, the app injects an expanded bootstrap set of intentionally vulnerable frontend examples (token storage, XSS sinks, wildcard `postMessage`, missing origin checks, hardcoded secrets, open redirects, unsafe HTML sinks, etc.) so the local model starts with stronger calibration examples before any user history exists. After the first successful analysis, these bootstrap examples are not reused.
 
 This is lightweight memory-based learning (few-shot + pattern reuse), not full model weight fine-tuning.
 
@@ -124,3 +151,7 @@ The UI now uses a lighter, friendlier style and includes:
 
 ## Windows UX note
 When launched as a GUI app (`pythonw`/PyInstaller `--windowed`), analysis now starts Ollama subprocesses with `CREATE_NO_WINDOW` on Windows so an extra command prompt window does not pop up during scanning.
+
+
+## Runtime config editing
+Use **Configure Providers** in the app UI to edit local/OpenAI/Claude provider settings via popup and save into `config.properties`.
